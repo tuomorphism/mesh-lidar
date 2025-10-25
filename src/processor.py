@@ -1,7 +1,7 @@
 import numpy as np
 import open3d as o3d
 
-from lidar_types import Scene
+from lidar_types import Scene, Cluster
 from clustering import compute_clusters
 
 
@@ -25,10 +25,30 @@ def preprocess(points: np.ndarray, voxel_size = 0.10) -> Scene:
         ground_plane=ground_plane
     )
 
+def postprocess(scene: Scene) -> Scene:
+    """
+    postprocessing of scene after clustering
+    """
+
+    def _filter_cluster(cluster: Cluster) -> bool:
+        # Simple variance of X, Y and Z
+        if cluster.geometry.cov.diagonal().sum() > 100:
+            return False
+        return True
+
+    filtered_clusters = []
+    for cluster in (scene.scene_clusters or []):
+        if _filter_cluster(cluster) is True:
+            filtered_clusters.append(cluster)
+
+    scene = Scene(points=scene.points, ground_plane=scene.ground_plane, scene_clusters=filtered_clusters)
+    return scene
+
 def _process_sweep(sweep: np.ndarray) -> Scene:
     preprocessed = preprocess(sweep)
     clustered = compute_clusters(preprocessed)
-    return clustered
+    postprocessed = postprocess(clustered)
+    return postprocessed
 
 
 def process_sweeps(sweeps: list[np.ndarray]) -> list[Scene]:

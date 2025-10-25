@@ -7,34 +7,126 @@ def _cluster_scene_dbscan(points: np.ndarray, voxel_eps: float = 1.0) -> np.ndar
     clustering = clustering.fit(points)
     return clustering.labels_
 
+def compute_pca_obb(points: np.ndarray, eps: float = 1e-9):
+    """
+    Compute an oriented bounding box for a 3D point set using PCA (via SVD).
+    Returns:
+        corners_world: (8,3) array, world-space corners in a consistent order
+        center: (3,) world-space center of the OBB
+        R: (3,3) rotation matrix, columns = OBB axes (right-handed, orthonormal)
+        extents: (3,) box edge lengths along OBB axes (positive)
+        lo, hi: (3,), (3,) min/max in OBB local coords (so that hi - lo = extents)
+    Notes:
+        - Stable to degeneracy; if rank < 3, falls back gracefully.
+        - Axis signs are stabilized so the “positive” side tends to be the larger span.
+    """
+    P = np.asarray(points, dtype=np.float64)
+    assert P.ndim == 2 and P.shape[1] == 3, "points must be (N,3)"
+    N = P.shape[0]
+    if N == 0:
+        raise ValueError("No points for OBB")
+    center = P.mean(axis=0)
+    X = P - center
+
+    # Degenerate quick-outs
+    if N == 1:
+        R = np.eye(3)
+        extents = np.array([eps, eps, eps])
+        lo = -0.5 * extents
+        hi =  0.5 * extents
+        corners_local = _corners_from_lo_hi(lo, hi)
+        return _world_from_local(corners_local, center, R), center, R, extents, lo, hi
+
+    # SVD gives principal directions as V^T rows -> columns of R are axes
+    # full_matrices=False avoids padded singular vectors for stability
+    U, S, VT = np.linalg.svd(X, full_matrices=False)   # X ≈ U * diag(S) * VT
+    R = VT.T                                           # columns are principal axes
+    # Sort axes by descending variance (singular values)
+    order = np.argsort(-S)[:3]
+    R = R[:, order]
+    S = S[order]
+
+    # Orthonormal clean-up (rarely needed but safe)
+    # re-orthonormalize with QR if numerical noise is high
+    # R, _ = np.linalg.qr(R)
+
+    # Enforce right-handed basis
+    if np.linalg.det(R) < 0:
+        R[:, 2] *= -1.0
+
+    # Project to local OBB frame
+    Y = X @ R
+
+    # Min/max in local frame
+    lo = Y.min(axis=0)
+    hi = Y.max(axis=0)
+
+    # Sign stabilization: prefer the axis direction that makes the positive side larger
+    # (reduces frame-to-frame flips).
+    for k in range(3):
+        if abs(lo[k]) > abs(hi[k]):
+            # Flip axis k
+            R[:, k] *= -1.0
+            lo[k], hi[k] = -hi[k], -lo[k]
+
+    # Compute extents, guard degeneracy
+    extents = np.maximum(hi - lo, eps)
+
+    # Recompute local center & world center for completeness
+    local_center = 0.5 * (lo + hi)
+    center = local_center @ R.T + center  # same as original center, numerically consistent
+
+    # Recenter lo/hi around new local center (optional; not strictly needed)
+    shift = local_center
+    lo = lo - shift
+    hi = hi - shift
+
+    # Make corners in local frame (consistent ordering), then map to world
+    corners_local = _corners_from_lo_hi(lo, hi)
+    corners_world = _world_from_local(corners_local, center, R)
+
+    return corners_world, center, R, extents, lo, hi
+
+
+def _corners_from_lo_hi(lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+    """Return 8 corners in a consistent order from per-axis lo/hi in local coords."""
+    # Order: (x,y,z) ∈ {lo,hi}^3 with a conventional pattern
+    xs = [lo[0], hi[0]]
+    ys = [lo[1], hi[1]]
+    zs = [lo[2], hi[2]]
+    corners = [
+        [xs[0], ys[0], zs[0]],
+        [xs[1], ys[0], zs[0]],
+        [xs[0], ys[1], zs[0]],
+        [xs[0], ys[0], zs[1]],
+        [xs[1], ys[1], zs[0]],
+        [xs[1], ys[0], zs[1]],
+        [xs[0], ys[1], zs[1]],
+        [xs[1], ys[1], zs[1]],
+    ]
+    return np.asarray(corners, dtype=np.float64)
+
+
+def _world_from_local(corners_local: np.ndarray, center: np.ndarray, R: np.ndarray) -> np.ndarray:
+    """Map local corners → world via x_world = center + R @ x_local."""
+    return corners_local @ R.T + center
+
+
 def _compute_cluster_geometry(cluster_data: np.ndarray) -> ClusterGeometry:
     assert cluster_data.shape[1] == 5
     # Separate the 3d data from other variables
     cluster_points = cluster_data[:, :3]
 
-    centroid = cluster_points.mean(axis=0)
-    X = cluster_points - centroid
-    cov = (X.T @ X) / (cluster_points.shape[0]-1)
-
-    # Compute the local coordinate transform
-    _, V = np.linalg.eigh(cov)
-    Y = X @ V
-
-    # Min and max in local coordinates
-    lo, hi = Y.min(axis=0), Y.max(axis=0)
-    corners_local = np.array([
-        [lo[0], lo[1], lo[2]],
-        [hi[0], lo[1], lo[2]],
-        [lo[0], hi[1], lo[2]],
-        [lo[0], lo[1], hi[2]],
-        [hi[0], hi[1], lo[2]],
-        [hi[0], lo[1], hi[2]],
-        [lo[0], hi[1], hi[2]],
-        [hi[0], hi[1], hi[2]]
-    ])
-    bbox = corners_local @ V.T + centroid
+    corners, center, R, extents, low_points, high_points = compute_pca_obb(cluster_points)
+    
+    cov = (cluster_points - center).T @ (cluster_points - center) / max(cluster_points.shape[0] - 1, 1)
     mean_intensity = cluster_data[:, 3].mean()
-    return ClusterGeometry(centroid, bbox, mean_intensity, cov)
+    return ClusterGeometry(
+        centroid = center,
+        bbox = corners,
+        mean_intensity = mean_intensity,
+        cov = cov
+    )
 
 
 
@@ -42,7 +134,7 @@ def compute_clusters(scene: Scene) -> Scene:
     """
     Obtains clusters from a single scene. Returns a Scene object with set clusters
     """
-    raw_clusters = _cluster_scene_dbscan(scene.points[:, :3], voxel_eps=1.5)
+    raw_clusters = _cluster_scene_dbscan(scene.points[:, :3], voxel_eps=2.0)
     cluster_labels = np.unique(raw_clusters)
     scene_clusters: list[Cluster] = []
     for c in cluster_labels:

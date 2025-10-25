@@ -1,88 +1,182 @@
 from __future__ import annotations
-from typing import Optional, Sequence
-
+from typing import Sequence, Dict, Optional, Tuple
 import numpy as np
 import open3d as o3d
-from lidar_types import Cluster, Scene
 
-# ---- Minimal cluster-color viewer ----
-class ClusterViewer:
-    """Minimal Open3D viewer: just points, colored by cluster label.
+# Fixed 12 cube edges for the ordering:
+# 0:(l,l,l) 1:(h,l,l) 2:(l,h,l) 3:(l,l,h) 4:(h,h,l) 5:(h,l,h) 6:(l,h,h) 7:(h,h,h)
+_CUBE_EDGES = np.array([
+    # bottom face (z = lo)
+    [0, 1], [1, 4], [4, 2], [2, 0],
+    # top face (z = hi)
+    [3, 5], [5, 7], [7, 6], [6, 3],
+    # verticals
+    [0, 3], [1, 5], [2, 6], [4, 7],
+], dtype=np.int32)
 
-    Keys: → / D = next  |  ← / A = prev  |  R = reset view  |  Q / ESC = quit
+def lineset_from_ordered_corners(corners_world: np.ndarray) -> o3d.geometry.LineSet:
+    """
+    corners_world: (8,3) in the fixed order shown above.
+    Returns a LineSet with all 12 edges.
+    """
+    assert corners_world.shape == (8, 3)
+    ls = o3d.geometry.LineSet()
+    ls.points = o3d.utility.Vector3dVector(corners_world.astype(np.float64, copy=False))
+    ls.lines  = o3d.utility.Vector2iVector(_CUBE_EDGES)
+    return ls
+
+def bbox_diag_length_from_corners(corners: np.ndarray) -> float:
+    return float(np.linalg.norm(corners.max(axis=0) - corners.min(axis=0)))
+
+def bbox_diag_length_from_minmax(bb2: np.ndarray) -> float:
+    return float(np.linalg.norm(bb2[1] - bb2[0]))
+
+# ---- viewer ----
+
+class ClusterBBoxViewer:
+    """
+    Simple Open3D legacy viewer:
+      - Renders points
+      - Renders all cluster bounding boxes, filtered by diag-length
+      - ←/A prev, →/D next, B toggle boxes, R reset, Q/ESC quit
     """
 
-    def __init__(self, scenes: Sequence[Scene]):
+    def __init__(
+        self,
+        scenes: Sequence,  # your Scene type
+        min_diag: float = 0.1,
+        max_diag: float = 1e6,
+        point_size: float = 2.0,
+        box_line_width: float = 1.5,
+    ):
         if not scenes:
             raise ValueError("Provide at least one scene")
         self.scenes = list(scenes)
         self.idx = 0
+        self.min_diag = float(min_diag)
+        self.max_diag = float(max_diag)
+        self.show_boxes = True
+
+        # Legacy visualizer for simplicity
         self.vis = o3d.visualization.VisualizerWithKeyCallback()
         self.pcd = o3d.geometry.PointCloud()
         self._added = False
 
-    # --- colors ---
-    @staticmethod
-    def _palette(K: int) -> np.ndarray:
-        # stable vivid palette; extend with HSV if needed
+        self._scene_box_cache: Dict[int, list[Tuple[str, o3d.geometry.Geometry]]] = {}
+        self._active_box_geoms: list[o3d.geometry.Geometry] = []
+
+        # materials-ish (legacy)
+        self._point_size = float(point_size)
+        self._box_line_width = float(box_line_width)
+
+    # ---- scene upload & caching ----
+
+    def _colors_from_labels(self, labels: Optional[np.ndarray], N: int) -> np.ndarray:
+        if labels is None or len(labels) != N:
+            return np.full((N, 3), 0.75, float)
+        labels = labels.astype(int, copy=False)
+        valid = labels >= 0
+        # short palette
         base = np.array([
             [0.121, 0.466, 0.705], [1.000, 0.498, 0.054], [0.172, 0.627, 0.172], [0.839, 0.152, 0.156],
             [0.580, 0.404, 0.741], [0.549, 0.337, 0.294], [0.890, 0.467, 0.761], [0.498, 0.498, 0.498],
             [0.737, 0.741, 0.133], [0.090, 0.745, 0.812],
-        ])
-        if K <= len(base):
-            return base[:K]
-        extra = K - len(base)
-        hsv = np.zeros((extra, 3))
-        hsv[:, 0] = np.linspace(0, 1, extra, endpoint=False)
-        hsv[:, 1] = 0.85
-        hsv[:, 2] = 0.95
-        return np.vstack([base, ClusterViewer._hsv_to_rgb(hsv)])
-
-    @staticmethod
-    def _hsv_to_rgb(hsv: np.ndarray) -> np.ndarray:
-        h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
-        i = np.floor(h * 6).astype(int)
-        f = h * 6 - i
-        p = v * (1 - s)
-        q = v * (1 - f * s)
-        t = v * (1 - (1 - f) * s)
-        i_mod = i % 6
-        rgb = np.empty((h.shape[0], 3))
-        m = i_mod == 0
-        rgb[m] = np.stack([v[m], t[m], p[m]], 1)
-        m = i_mod == 1
-        rgb[m] = np.stack([q[m], v[m], p[m]], 1)
-        m = i_mod == 2
-        rgb[m] = np.stack([p[m], v[m], t[m]], 1)
-        m = i_mod == 3
-        rgb[m] = np.stack([p[m], q[m], v[m]], 1)
-        m = i_mod == 4
-        rgb[m] = np.stack([t[m], p[m], v[m]], 1)
-        m = i_mod == 5
-        rgb[m] = np.stack([v[m], p[m], q[m]], 1)
-        return rgb
-
-    def _colors_from_labels(self, labels: Optional[np.ndarray]) -> np.ndarray:
-        N = len(self.scenes[self.idx].points)
-        if labels is None or len(labels) != N:
-            return np.full((N, 3), 0.75, float)  # fallback grey
-        labels = labels.astype(int)
-        valid = labels >= 0
+        ], dtype=float)
         K = int(labels[valid].max() + 1) if valid.any() else 1
-        pal = self._palette(max(K, 8))
-        colors = np.full((N, 3), 0.6, float)
-        colors[valid] = pal[labels[valid] % len(pal)]
-        return colors
+        pal = base if K <= len(base) else np.vstack([base, base[:(K-len(base))]])
+        cols = np.full((N, 3), 0.6, float)
+        cols[valid] = pal[labels[valid] % len(pal)]
+        return cols
+
+    def _compute_boxes_for_scene(self, s_idx: int):
+        if s_idx in self._scene_box_cache:
+            return
+
+        s = self.scenes[s_idx]
+        boxes: list[Tuple[str, o3d.geometry.Geometry]] = []
+
+        scene_clusters = getattr(s, "scene_clusters", None)
+        if scene_clusters:
+            for cl in scene_clusters:
+                bb = getattr(cl.geometry, "bbox", None)
+                ls = None
+                if isinstance(bb, np.ndarray) and bb.shape == (8, 3):
+                    diag = bbox_diag_length_from_corners(bb)
+                    if self.min_diag <= diag <= self.max_diag:
+                        ls = lineset_from_ordered_corners(bb)
+
+                if ls is not None:
+                    # lightly tint boxes; color by cluster label index
+                    color = (np.array([(getattr(cl, "label", 0) * 37) % 255,
+                                       (getattr(cl, "label", 0) * 73) % 255,
+                                       (getattr(cl, "label", 0) * 19) % 255]) / 255.0).tolist()
+                    print(cl.label)
+                    color = self._colors_from_labels(np.array([cl.label]), 1)[0].tolist()
+                    ls.colors = o3d.utility.Vector3dVector(np.tile(color, (len(ls.lines), 1)))
+                    name = f"bbox_{s_idx}_{getattr(cl, 'label', 0)}"
+                    boxes.append((name, ls))
+
+        self._scene_box_cache[s_idx] = boxes
+
+    def _add_current_scene_boxes(self):
+        """Add boxes for self.idx and remember which ones were added."""
+        self._active_box_geoms.clear()
+        for _, geom in self._scene_box_cache.get(self.idx, []):
+            self.vis.add_geometry(geom, reset_bounding_box=False)
+            self._active_box_geoms.append(geom)
+
+    def _remove_all_boxes(self):
+        """Remove whatever boxes are currently in the window (regardless of scene)."""
+        for geom in self._active_box_geoms:
+            try:
+                self.vis.remove_geometry(geom, reset_bounding_box=False)
+            except Exception:
+                pass
+        self._active_box_geoms.clear()
 
     def _set_scene(self, idx: int):
         self.idx = max(0, min(idx, len(self.scenes) - 1))
         s = self.scenes[self.idx]
-        self.pcd.points = o3d.utility.Vector3dVector(s.points[:, :3])
-        self.pcd.colors = o3d.utility.Vector3dVector(self._colors_from_labels(s.cluster_labels))
+
+        # points (drop NaNs/Infs defensively)
+        pts_all = np.asarray(s.points[:, :3], dtype=np.float64)
+        good = np.isfinite(pts_all).all(axis=1)
+        pts = pts_all[good]
+        self.pcd.points = o3d.utility.Vector3dVector(pts)
+
+        # colors
+        labels = getattr(s, "cluster_labels", None)
+        cols = self._colors_from_labels(labels[good] if (labels is not None and len(labels) == len(pts_all)) else None,
+                                        len(pts))
+        self.pcd.colors = o3d.utility.Vector3dVector(cols)
+
         if self._added:
             self.vis.update_geometry(self.pcd)
-            self.vis.update_renderer()
+        else:
+            self.vis.add_geometry(self.pcd, reset_bounding_box=True)
+            self._added = True
+
+        # adjust render options
+        opt = self.vis.get_render_option()
+        opt.background_color = np.array([0.02, 0.02, 0.025])
+        opt.point_size = self._point_size
+        try:
+            opt.line_width = self._box_line_width  # available in newer legacy builds
+        except AttributeError:
+            pass
+
+        # cache boxes for this scene (once)
+        self._compute_boxes_for_scene(self.idx)
+
+        # remove any old boxes, then (re)add according to toggle
+        self._remove_all_boxes()
+        if self.show_boxes:
+            self._add_current_scene_boxes()
+
+        # finally, refresh
+        self.vis.update_renderer()
+
+    # ---- key callbacks ----
 
     def _cb_next(self, vis):
         self._set_scene(self.idx + 1)
@@ -90,6 +184,15 @@ class ClusterViewer:
 
     def _cb_prev(self, vis):
         self._set_scene(self.idx - 1)
+        return False
+
+    def _cb_toggle_boxes(self, vis):
+        self.show_boxes = not self.show_boxes
+        if self.show_boxes:
+            self._add_current_scene_boxes()
+        else:
+            self._remove_all_boxes()
+        self.vis.update_renderer()
         return False
 
     def _cb_reset(self, vis):
@@ -100,35 +203,32 @@ class ClusterViewer:
         self.vis.close()
         return False
 
-    # --- run ---
-    def run(self, title: str = "Cluster Viewer", w: int = 1280, h: int = 768):
-        self.vis.create_window(title, width=w, height=h)
-        opt = self.vis.get_render_option()
-        opt.background_color = np.array([0.02, 0.02, 0.025])
-        opt.point_size = 2.0
+    # ---- run ----
 
+    def run(self, title: str = "Cluster BBoxes", w: int = 1280, h: int = 768):
+        self.vis.create_window(title, width=w, height=h)
         self._set_scene(0)
-        self.vis.add_geometry(self.pcd, reset_bounding_box=True)
-        self._added = True
 
         # keys
         self.vis.register_key_callback(262, self._cb_next)  # →
         self.vis.register_key_callback(ord('D'), self._cb_next)
         self.vis.register_key_callback(263, self._cb_prev)  # ←
         self.vis.register_key_callback(ord('A'), self._cb_prev)
+        self.vis.register_key_callback(ord('B'), self._cb_toggle_boxes)  # toggle boxes
         self.vis.register_key_callback(ord('R'), self._cb_reset)
         self.vis.register_key_callback(256, self._cb_quit)  # ESC
         self.vis.register_key_callback(ord('Q'), self._cb_quit)
 
-        print("[Controls] ←/A prev • →/D next • R reset • Q/ESC quit")
+        print("[Controls] ←/A prev • →/D next • B boxes on/off • R reset • Q/ESC quit")
         try:
             self.vis.run()
         finally:
             self.vis.destroy_window()
 
 
-def view_clusters(scenes: Sequence[Scene]):
-    """
-    Runs visualizer for scenes
-    """
-    ClusterViewer(scenes).run()
+# Convenience function
+def view_cluster_bboxes(
+    scenes: Sequence, min_diag: float = 0.1, max_diag: float = 1e6,
+    title: str = "Cluster BBoxes", w: int = 1280, h: int = 768
+):
+    ClusterBBoxViewer(scenes, min_diag=min_diag, max_diag=max_diag).run(title=title, w=w, h=h)
