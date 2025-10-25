@@ -3,7 +3,6 @@ from sklearn.cluster import DBSCAN
 from lidar_types import ClusterGeometry, Scene, Cluster
 
 def _cluster_scene_dbscan(points: np.ndarray, voxel_eps: float = 1.0) -> np.ndarray:
-    print(voxel_eps)
     clustering = DBSCAN(eps = voxel_eps)
     clustering = clustering.fit(points)
     return clustering.labels_
@@ -43,12 +42,12 @@ def compute_clusters(scene: Scene) -> Scene:
     """
     Obtains clusters from a single scene. Returns a Scene object with set clusters
     """
-    raw_clusters = _cluster_scene_dbscan(scene.points[:, :3], voxel_eps=0.8)
+    raw_clusters = _cluster_scene_dbscan(scene.points[:, :3], voxel_eps=1.5)
     cluster_labels = np.unique(raw_clusters)
     scene_clusters: list[Cluster] = []
     for c in cluster_labels:
         correct_mask = np.nonzero(raw_clusters == c)[0]
-        if correct_mask.shape[0] == 0:
+        if correct_mask.shape[0] <= 10: # Remove small clusters
             continue
         cluster_points = scene.points[correct_mask, :]
         cluster_geo = _compute_cluster_geometry(cluster_points)

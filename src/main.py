@@ -8,8 +8,6 @@ if __name__ == '__main__':
     scene_indices = [6 + i for i in range(30 - 6 + 1)]
     sweeps = [load_sweep(root, 0, 1, idx) for idx in scene_indices]
 
-    processed = process_sweeps(sweeps[:2])
-
-    print(len(processed[0].scene_clusters))
+    processed = process_sweeps(sweeps[:10])
 
     view_clusters(processed)

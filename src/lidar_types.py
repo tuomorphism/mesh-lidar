@@ -22,6 +22,9 @@ class Cluster:
     label: int = field(default=0)
 
     def points(self, raw_data: np.ndarray) -> np.ndarray:
+        """
+        points belonging to the cluster
+        """
         return raw_data[self.member_indices, :]
 
 @dataclass
@@ -45,3 +48,15 @@ class Scene:
             cluster_mapping = {idx: cluster for idx in cluster.member_indices}
             total_membership_mapping = total_membership_mapping | cluster_mapping
         return total_membership_mapping
+
+    @property
+    def cluster_labels(self) -> np.ndarray:
+        """
+        simple list of cluster labels for all points
+        """
+        def _map_cluster(cluster: Cluster | None):
+            if cluster is None:
+                return -1
+            return cluster.label
+        mapping = self.cluster_membership
+        return np.asarray([_map_cluster(mapping.get(idx)) for idx in range(self.points.shape[0])])

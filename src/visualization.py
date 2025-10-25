@@ -75,16 +75,11 @@ class ClusterViewer:
         colors[valid] = pal[labels[valid] % len(pal)]
         return colors
 
-    def _get_cluster_colors(self, scene: Scene):
-        cluster_points = [scene.cluster_membership.get(point_idx) for point_idx in range(scene.points.shape[0])]
-        cluster_labels = [cluster.label if cluster is not None else -1 for cluster in cluster_points]
-        return self._colors_from_labels(np.array(cluster_labels))
-
     def _set_scene(self, idx: int):
         self.idx = max(0, min(idx, len(self.scenes) - 1))
         s = self.scenes[self.idx]
         self.pcd.points = o3d.utility.Vector3dVector(s.points[:, :3])
-        self.pcd.colors = o3d.utility.Vector3dVector(self._get_cluster_colors(s))
+        self.pcd.colors = o3d.utility.Vector3dVector(self._colors_from_labels(s.cluster_labels))
         if self._added:
             self.vis.update_geometry(self.pcd)
             self.vis.update_renderer()
