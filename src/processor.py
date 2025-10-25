@@ -1,0 +1,35 @@
+import numpy as np
+import open3d as o3d
+
+from lidar_types import Scene
+from clustering import compute_clusters
+
+
+def preprocess(points: np.ndarray, voxel_size = 0.10) -> Scene:
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+
+    # Estimating ground
+    ground_plane, ground_points = pcd.segment_plane(
+        distance_threshold = 5 * voxel_size, 
+        ransac_n = 20,
+        num_iterations = 100
+    )
+    mask = np.ones(points.shape[0], dtype=bool)
+    mask[ground_points] = False
+
+    non_ground_points = points[mask, :]
+
+    return Scene(
+        points=non_ground_points,
+        ground_plane=ground_plane
+    )
+
+def _process_sweep(sweep: np.ndarray) -> Scene:
+    preprocessed = preprocess(sweep)
+    clustered = compute_clusters(preprocessed)
+    return clustered
+
+
+def process_sweeps(sweeps: list[np.ndarray]) -> list[Scene]:
+    return list(map(_process_sweep, sweeps))
