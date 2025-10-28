@@ -37,51 +37,32 @@ def compute_pca_obb(points: np.ndarray, eps: float = 1e-9):
         corners_local = _corners_from_lo_hi(lo, hi)
         return _world_from_local(corners_local, center, R), center, R, extents, lo, hi
 
-    # SVD gives principal directions as V^T rows -> columns of R are axes
-    # full_matrices=False avoids padded singular vectors for stability
     U, S, VT = np.linalg.svd(X, full_matrices=False)   # X ≈ U * diag(S) * VT
     R = VT.T                                           # columns are principal axes
-    # Sort axes by descending variance (singular values)
     order = np.argsort(-S)[:3]
     R = R[:, order]
     S = S[order]
 
-    # Orthonormal clean-up (rarely needed but safe)
-    # re-orthonormalize with QR if numerical noise is high
-    # R, _ = np.linalg.qr(R)
-
-    # Enforce right-handed basis
     if np.linalg.det(R) < 0:
         R[:, 2] *= -1.0
 
-    # Project to local OBB frame
     Y = X @ R
 
-    # Min/max in local frame
     lo = Y.min(axis=0)
     hi = Y.max(axis=0)
 
-    # Sign stabilization: prefer the axis direction that makes the positive side larger
-    # (reduces frame-to-frame flips).
     for k in range(3):
         if abs(lo[k]) > abs(hi[k]):
             # Flip axis k
             R[:, k] *= -1.0
             lo[k], hi[k] = -hi[k], -lo[k]
-
-    # Compute extents, guard degeneracy
     extents = np.maximum(hi - lo, eps)
-
-    # Recompute local center & world center for completeness
     local_center = 0.5 * (lo + hi)
     center = local_center @ R.T + center  # same as original center, numerically consistent
-
-    # Recenter lo/hi around new local center (optional; not strictly needed)
     shift = local_center
     lo = lo - shift
     hi = hi - shift
 
-    # Make corners in local frame (consistent ordering), then map to world
     corners_local = _corners_from_lo_hi(lo, hi)
     corners_world = _world_from_local(corners_local, center, R)
 
@@ -117,18 +98,18 @@ def _compute_cluster_geometry(cluster_data: np.ndarray) -> ClusterGeometry:
     # Separate the 3d data from other variables
     cluster_points = cluster_data[:, :3]
 
-    corners, center, R, extents, low_points, high_points = compute_pca_obb(cluster_points)
-    
+    corners, center, rot, sizes, low_points, high_points = compute_pca_obb(cluster_points)
+
     cov = (cluster_points - center).T @ (cluster_points - center) / max(cluster_points.shape[0] - 1, 1)
     mean_intensity = cluster_data[:, 3].mean()
     return ClusterGeometry(
         centroid = center,
         bbox = corners,
         mean_intensity = mean_intensity,
-        cov = cov
+        cov = cov,
+        rotation = rot,
+        sizes = sizes
     )
-
-
 
 def compute_clusters(scene: Scene) -> Scene:
     """

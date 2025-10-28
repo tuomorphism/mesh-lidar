@@ -2,17 +2,31 @@ from __future__ import annotations
 from typing import Sequence, Dict, Optional, Tuple
 import numpy as np
 import open3d as o3d
+from tracking_visualization import MatchOverlay
 
 # Fixed 12 cube edges for the ordering:
 # 0:(l,l,l) 1:(h,l,l) 2:(l,h,l) 3:(l,l,h) 4:(h,h,l) 5:(h,l,h) 6:(l,h,h) 7:(h,h,h)
-_CUBE_EDGES = np.array([
-    # bottom face (z = lo)
-    [0, 1], [1, 4], [4, 2], [2, 0],
-    # top face (z = hi)
-    [3, 5], [5, 7], [7, 6], [6, 3],
-    # verticals
-    [0, 3], [1, 5], [2, 6], [4, 7],
-], dtype=np.int32)
+_CUBE_EDGES = np.array(
+    [
+        # bottom face (z = lo)
+        [0, 1],
+        [1, 4],
+        [4, 2],
+        [2, 0],
+        # top face (z = hi)
+        [3, 5],
+        [5, 7],
+        [7, 6],
+        [6, 3],
+        # verticals
+        [0, 3],
+        [1, 5],
+        [2, 6],
+        [4, 7],
+    ],
+    dtype=np.int32,
+)
+
 
 def lineset_from_ordered_corners(corners_world: np.ndarray) -> o3d.geometry.LineSet:
     """
@@ -22,16 +36,20 @@ def lineset_from_ordered_corners(corners_world: np.ndarray) -> o3d.geometry.Line
     assert corners_world.shape == (8, 3)
     ls = o3d.geometry.LineSet()
     ls.points = o3d.utility.Vector3dVector(corners_world.astype(np.float64, copy=False))
-    ls.lines  = o3d.utility.Vector2iVector(_CUBE_EDGES)
+    ls.lines = o3d.utility.Vector2iVector(_CUBE_EDGES)
     return ls
+
 
 def bbox_diag_length_from_corners(corners: np.ndarray) -> float:
     return float(np.linalg.norm(corners.max(axis=0) - corners.min(axis=0)))
 
+
 def bbox_diag_length_from_minmax(bb2: np.ndarray) -> float:
     return float(np.linalg.norm(bb2[1] - bb2[0]))
 
+
 # ---- viewer ----
+
 
 class ClusterBBoxViewer:
     """
@@ -69,7 +87,29 @@ class ClusterBBoxViewer:
         self._point_size = float(point_size)
         self._box_line_width = float(box_line_width)
 
+        self._matches = MatchOverlay(lineset_from_ordered_corners, _CUBE_EDGES)
+
     # ---- scene upload & caching ----
+
+    def add_matches(
+        self,
+        prev_scene_index: int,
+        next_scene_index: int,
+        assignments,
+        predicted_poses,
+        track_ids,
+        next_clusters,
+        predicted_sizes=None,
+    ):
+        self._matches.add_matches(
+            prev_scene_index,
+            next_scene_index,
+            assignments,
+            predicted_poses,
+            track_ids,
+            next_clusters,
+            predicted_sizes,
+        )
 
     def _colors_from_labels(self, labels: Optional[np.ndarray], N: int) -> np.ndarray:
         if labels is None or len(labels) != N:
@@ -77,13 +117,23 @@ class ClusterBBoxViewer:
         labels = labels.astype(int, copy=False)
         valid = labels >= 0
         # short palette
-        base = np.array([
-            [0.121, 0.466, 0.705], [1.000, 0.498, 0.054], [0.172, 0.627, 0.172], [0.839, 0.152, 0.156],
-            [0.580, 0.404, 0.741], [0.549, 0.337, 0.294], [0.890, 0.467, 0.761], [0.498, 0.498, 0.498],
-            [0.737, 0.741, 0.133], [0.090, 0.745, 0.812],
-        ], dtype=float)
+        base = np.array(
+            [
+                [0.121, 0.466, 0.705],
+                [1.000, 0.498, 0.054],
+                [0.172, 0.627, 0.172],
+                [0.839, 0.152, 0.156],
+                [0.580, 0.404, 0.741],
+                [0.549, 0.337, 0.294],
+                [0.890, 0.467, 0.761],
+                [0.498, 0.498, 0.498],
+                [0.737, 0.741, 0.133],
+                [0.090, 0.745, 0.812],
+            ],
+            dtype=float,
+        )
         K = int(labels[valid].max() + 1) if valid.any() else 1
-        pal = base if K <= len(base) else np.vstack([base, base[:(K-len(base))]])
+        pal = base if K <= len(base) else np.vstack([base, base[: (K - len(base))]])
         cols = np.full((N, 3), 0.6, float)
         cols[valid] = pal[labels[valid] % len(pal)]
         return cols
@@ -107,12 +157,22 @@ class ClusterBBoxViewer:
 
                 if ls is not None:
                     # lightly tint boxes; color by cluster label index
-                    color = (np.array([(getattr(cl, "label", 0) * 37) % 255,
-                                       (getattr(cl, "label", 0) * 73) % 255,
-                                       (getattr(cl, "label", 0) * 19) % 255]) / 255.0).tolist()
-                    print(cl.label)
-                    color = self._colors_from_labels(np.array([cl.label]), 1)[0].tolist()
-                    ls.colors = o3d.utility.Vector3dVector(np.tile(color, (len(ls.lines), 1)))
+                    color = (
+                        np.array(
+                            [
+                                (getattr(cl, "label", 0) * 37) % 255,
+                                (getattr(cl, "label", 0) * 73) % 255,
+                                (getattr(cl, "label", 0) * 19) % 255,
+                            ]
+                        )
+                        / 255.0
+                    ).tolist()
+                    color = self._colors_from_labels(np.array([cl.label]), 1)[
+                        0
+                    ].tolist()
+                    ls.colors = o3d.utility.Vector3dVector(
+                        np.tile(color, (len(ls.lines), 1))
+                    )
                     name = f"bbox_{s_idx}_{getattr(cl, 'label', 0)}"
                     boxes.append((name, ls))
 
@@ -146,8 +206,14 @@ class ClusterBBoxViewer:
 
         # colors
         labels = getattr(s, "cluster_labels", None)
-        cols = self._colors_from_labels(labels[good] if (labels is not None and len(labels) == len(pts_all)) else None,
-                                        len(pts))
+        cols = self._colors_from_labels(
+            (
+                labels[good]
+                if (labels is not None and len(labels) == len(pts_all))
+                else None
+            ),
+            len(pts),
+        )
         self.pcd.colors = o3d.utility.Vector3dVector(cols)
 
         if self._added:
@@ -172,6 +238,10 @@ class ClusterBBoxViewer:
         self._remove_all_boxes()
         if self.show_boxes:
             self._add_current_scene_boxes()
+
+        # remove old overlays and add those for this scene (if any)
+        self._matches.clear_active(self.vis)
+        self._matches.add_active(self.vis, self.idx)
 
         # finally, refresh
         self.vis.update_renderer()
@@ -211,13 +281,13 @@ class ClusterBBoxViewer:
 
         # keys
         self.vis.register_key_callback(262, self._cb_next)  # →
-        self.vis.register_key_callback(ord('D'), self._cb_next)
+        self.vis.register_key_callback(ord("D"), self._cb_next)
         self.vis.register_key_callback(263, self._cb_prev)  # ←
-        self.vis.register_key_callback(ord('A'), self._cb_prev)
-        self.vis.register_key_callback(ord('B'), self._cb_toggle_boxes)  # toggle boxes
-        self.vis.register_key_callback(ord('R'), self._cb_reset)
+        self.vis.register_key_callback(ord("A"), self._cb_prev)
+        self.vis.register_key_callback(ord("B"), self._cb_toggle_boxes)  # toggle boxes
+        self.vis.register_key_callback(ord("R"), self._cb_reset)
         self.vis.register_key_callback(256, self._cb_quit)  # ESC
-        self.vis.register_key_callback(ord('Q'), self._cb_quit)
+        self.vis.register_key_callback(ord("Q"), self._cb_quit)
 
         print("[Controls] ←/A prev • →/D next • B boxes on/off • R reset • Q/ESC quit")
         try:
@@ -228,7 +298,9 @@ class ClusterBBoxViewer:
 
 # Convenience function
 def view_cluster_bboxes(
-    scenes: Sequence, min_diag: float = 0.1, max_diag: float = 1e6,
-    title: str = "Cluster BBoxes", w: int = 1280, h: int = 768
+    viewer: ClusterBBoxViewer,
+    title: str = "Cluster BBoxes",
+    w: int = 1280,
+    h: int = 768,
 ):
-    ClusterBBoxViewer(scenes, min_diag=min_diag, max_diag=max_diag).run(title=title, w=w, h=h)
+    return viewer.run(title=title, w=w, h=h)

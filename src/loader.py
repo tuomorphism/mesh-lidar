@@ -13,6 +13,10 @@ def _load_lidar_bin(path: Path) -> np.ndarray:
 
 def load_sweep(root: Path, top_id: int, scene_id: int, sweep_id: int):
     """Return (points) for one sweep id like 1, 2, 3..."""
-    bin_path = root / "sweeps" / f"LIDAR_TOP_id_{top_id}/scene_{scene_id}_{sweep_id:06d}.pcd.bin"
+    bin_path = (
+        root
+        / "sweeps"
+        / f"LIDAR_TOP_id_{top_id}/scene_{scene_id}_{sweep_id:06d}.pcd.bin"
+    )
     pts = _load_lidar_bin(bin_path)
     return pts

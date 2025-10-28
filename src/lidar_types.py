@@ -2,21 +2,27 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
+
 @dataclass
 class ClusterGeometry:
     """
     Dataclass for cluster geometry
     """
+
     centroid: np.ndarray
     bbox: np.ndarray
     mean_intensity: float
     cov: np.ndarray
+    rotation: np.ndarray
+    sizes: np.ndarray
+
 
 @dataclass
 class Cluster:
     """
     Dataclass describing a 3d cluster
     """
+
     member_indices: list[int]
     geometry: ClusterGeometry
     label: int = field(default=0)
@@ -27,14 +33,17 @@ class Cluster:
         """
         return raw_data[self.member_indices, :]
 
+
 @dataclass
 class Scene:
     """
     Main 3d scene dataclass
     """
+
     points: np.ndarray
     ground_plane: np.ndarray
     scene_clusters: Optional[list[Cluster]] = None
+    timestamp: Optional[float] = None
 
     @property
     def cluster_membership(self) -> dict[int, Cluster]:
@@ -54,9 +63,13 @@ class Scene:
         """
         simple list of cluster labels for all points
         """
+
         def _map_cluster(cluster: Cluster | None):
             if cluster is None:
                 return -1
             return cluster.label
+
         mapping = self.cluster_membership
-        return np.asarray([_map_cluster(mapping.get(idx)) for idx in range(self.points.shape[0])])
+        return np.asarray(
+            [_map_cluster(mapping.get(idx)) for idx in range(self.points.shape[0])]
+        )
