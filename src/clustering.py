@@ -9,77 +9,13 @@ def _cluster_scene_dbscan(points: np.ndarray, voxel_eps: float = 1.0) -> np.ndar
     return clustering.labels_
 
 
-def compute_pca_obb(points: np.ndarray, eps: float = 1e-9):
-    """
-    Compute an oriented bounding box for a 3D point set using PCA (via SVD).
-    Returns:
-        corners_world: (8,3) array, world-space corners in a consistent order
-        center: (3,) world-space center of the OBB
-        R: (3,3) rotation matrix, columns = OBB axes (right-handed, orthonormal)
-        extents: (3,) box edge lengths along OBB axes (positive)
-        lo, hi: (3,), (3,) min/max in OBB local coords (so that hi - lo = extents)
-    Notes:
-        - Stable to degeneracy; if rank < 3, falls back gracefully.
-        - Axis signs are stabilized so the “positive” side tends to be the larger span.
-    """
-    P = np.asarray(points, dtype=np.float64)
-    assert P.ndim == 2 and P.shape[1] == 3, "points must be (N,3)"
-    N = P.shape[0]
-    if N == 0:
-        raise ValueError("No points for OBB")
-    center = P.mean(axis=0)
-    X = P - center
-
-    # Degenerate quick-outs
-    if N == 1:
-        R = np.eye(3)
-        extents = np.array([eps, eps, eps])
-        lo = -0.5 * extents
-        hi = 0.5 * extents
-        corners_local = _corners_from_lo_hi(lo, hi)
-        return _world_from_local(corners_local, center, R), center, R, extents, lo, hi
-
-    U, S, VT = np.linalg.svd(X, full_matrices=False)  # X ≈ U * diag(S) * VT
-    R = VT.T  # columns are principal axes
-    order = np.argsort(-S)[:3]
-    R = R[:, order]
-    S = S[order]
-
-    if np.linalg.det(R) < 0:
-        R[:, 2] *= -1.0
-
-    Y = X @ R
-
-    lo = Y.min(axis=0)
-    hi = Y.max(axis=0)
-
-    for k in range(3):
-        if abs(lo[k]) > abs(hi[k]):
-            # Flip axis k
-            R[:, k] *= -1.0
-            lo[k], hi[k] = -hi[k], -lo[k]
-    extents = np.maximum(hi - lo, eps)
-    local_center = 0.5 * (lo + hi)
-    center = (
-        local_center @ R.T + center
-    )  # same as original center, numerically consistent
-    shift = local_center
-    lo = lo - shift
-    hi = hi - shift
-
-    corners_local = _corners_from_lo_hi(lo, hi)
-    corners_world = _world_from_local(corners_local, center, R)
-
-    return corners_world, center, R, extents, lo, hi
-
-
 def compute_yaw_obb(points: np.ndarray, eps: float = 1e-6):
 
     def _yaw_from_cov_xy(XY: np.ndarray) -> float:
         # XY: (N,2) centered points
         C = XY.T @ XY / max(XY.shape[0] - 1, 1)
         # principal dir is eigenvector of largest eigval
-        vals, vecs = np.linalg.eigh(C)  # eigh: symmetric -> sorted ascending
+        _, vecs = np.linalg.eigh(C)  # eigh: symmetric -> sorted ascending
         v = vecs[:, -1]  # principal axis in XY
         # yaw from principal axis
         return float(np.arctan2(v[1], v[0]))
@@ -102,23 +38,21 @@ def compute_yaw_obb(points: np.ndarray, eps: float = 1e-6):
     center = P.mean(axis=0)
     X = P - center
 
-    # yaw from XY covariance (ignore z for orientation)
+    # yaw from XY covariance (ignoring z for orientation)
     yaw = _yaw_from_cov_xy(X[:, :2])
     Rz = _R_from_yaw(yaw)
 
-    # project to yaw frame and take AABB there -> extents & corners
     Y = X @ Rz
     lo = Y.min(axis=0)
     hi = Y.max(axis=0)
     extents = np.maximum(hi - lo, eps)
 
-    # center box around its local center (no sign heuristics; prevents flicker)
     local_center = 0.5 * (lo + hi)
     lo -= local_center
     hi -= local_center
     center_world = center + local_center @ Rz.T
 
-    corners_local = _corners_from_lo_hi(lo, hi)  # your existing function
+    corners_local = _corners_from_lo_hi(lo, hi)
     corners_world = _world_from_local(corners_local, center_world, Rz)
 
     return corners_world, center_world, Rz, extents, lo, hi, yaw
@@ -126,7 +60,6 @@ def compute_yaw_obb(points: np.ndarray, eps: float = 1e-6):
 
 def _corners_from_lo_hi(lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     """Return 8 corners in a consistent order from per-axis lo/hi in local coords."""
-    # Order: (x,y,z) ∈ {lo,hi}^3 with a conventional pattern
     xs = [lo[0], hi[0]]
     ys = [lo[1], hi[1]]
     zs = [lo[2], hi[2]]

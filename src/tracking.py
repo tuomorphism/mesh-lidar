@@ -43,21 +43,6 @@ class TrackingConf:
     dt_default: float = 0.1  # fallback Δt
 
 
-def _pose_err(Ta, Tb, m_per_rad=2.0):
-    # translational & angular error, plus your coupled metric
-
-    Ra, ta = Ta[:3, :3], Ta[:3, 3]
-    Rb, tb = Tb[:3, :3], Tb[:3, 3]
-    # translation
-    et = float(np.linalg.norm(tb - ta))
-    # rotation angle
-    tr = np.clip(np.trace(Ra.T @ Rb), -1.0, 3.0)
-    ang = float(np.arccos(0.5 * (tr - 1.0)))  # radians
-    # coupled metric
-    d = pose_distance_SE3(Ta, Tb, lambda_m_per_rad=m_per_rad)
-    return et, degrees(ang), d
-
-
 class Tracker:
     def __init__(self, conf: TrackingConf) -> None:
         self.conf = conf
@@ -112,10 +97,18 @@ class Tracker:
     def _estimate_twist_from_pair(
         self, T_prev: np.ndarray, T_now: np.ndarray, dt: float
     ) -> np.ndarray:
+        """
+        estimating the twist (element of lie algebra se(3)) from pair of world poses.
+        """
+
         T_prev_sanitized = sanitize_T(T_prev)
         T_now_sanitized = sanitize_T(T_now)
 
+        # Taking the inverse of previous position (sanitized) and then applying the current pose, we obtain the relative pose T_rel
         T_rel = rigid_inverse(T_prev_sanitized) @ T_now_sanitized
+
+        # Now we take the Lie group logarithm of the relative pose, obtaining the twist in two components (omega and v)
+        # omega is the rotation and v is the translation components
         omega, v = log_SE3(T_rel)
         dt_safe = max(float(dt), 1e-6)
 
@@ -189,19 +182,6 @@ class Tracker:
         self.tracks = [tr for tr in self.tracks if tr.missed < self.conf.missed_tracks]
 
     def apply(self, scenes: List[Scene]):
-        def _yaw_from_R(R):
-            # assume Z-up, yaw about +Z. If your axes differ, adapt here.
-            # Uses atan2(sin, cos) from the 2x2 top-left submatrix.
-            return float(np.arctan2(R[1, 0], R[0, 0]))
-
-        def _ang_yaw_deg(Ra, Rb):
-            ya = _yaw_from_R(Ra)
-            yb = _yaw_from_R(Rb)
-            d = ya - yb
-            # wrap to [-pi, pi]
-            d = (d + np.pi) % (2 * np.pi) - np.pi
-            return abs(np.degrees(d))
-
         if not scenes:
             return
 
