@@ -4,6 +4,16 @@ import numpy as np
 
 
 @dataclass
+class Sweep:
+    """
+    Dataclass for containing Sweep loader data
+    """
+
+    pts: np.ndarray
+    metadata: dict
+
+
+@dataclass
 class ClusterGeometry:
     """
     Dataclass for cluster geometry

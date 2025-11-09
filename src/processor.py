@@ -3,11 +3,14 @@ import json
 import numpy as np
 import open3d as o3d
 
-from lidar_types import Scene, Cluster
+from lidar_types import Scene, Cluster, Sweep
 from clustering import compute_clusters
 
 
 def preprocess(points: np.ndarray, voxel_size=0.10) -> Scene:
+    """
+    preprocessing of sweep points before clustering
+    """
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points[:, :3])
 
@@ -47,13 +50,27 @@ def postprocess(scene: Scene) -> Scene:
     return scene
 
 
-def _process_sweep(index: int, sweep: np.ndarray) -> Scene:
+def _process_sweep(
+    index: int, sweep: np.ndarray, metadata: dict | None = None
+) -> Scene:
     preprocessed = preprocess(sweep)
     clustered = compute_clusters(preprocessed)
     postprocessed = postprocess(clustered)
-    postprocessed.timestamp = index
+    postprocessed.timestamp = (
+        metadata.get("timestamp", index) * 0.1
+        if metadata is not None
+        else index * 0.1  # Assumes 10Hz sweeps.
+    )
     return postprocessed
 
 
-def process_sweeps(sweeps: list[np.ndarray]) -> list[Scene]:
-    return list(map(lambda x: _process_sweep(x[0], x[1]), enumerate(sweeps)))
+def process_sweeps(sweeps: list[Sweep]) -> list[Scene]:
+    """
+    Processes a list of sweep data into Scene objects.
+    """
+    return list(
+        map(
+            lambda x: _process_sweep(x[0], x[1].pts, x[1].metadata),
+            enumerate(sweeps),
+        )
+    )

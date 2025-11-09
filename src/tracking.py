@@ -1,12 +1,20 @@
+from math import degrees
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from lidar_types import Scene, Cluster
-from pose_calculations import pose_distance_SE3, exp_SE3, log_SE3, hat_se3
-
-# ----------------- Data structures -----------------
+from pose_calculations import (
+    pose_distance_SE3,
+    exp_SE3,
+    log_SE3,
+    hat_se3,
+    project_to_SO3,
+    rigid_inverse,
+    sanitize_T,
+)
+from tracking_plot import plot_scene_pair
 
 
 @dataclass
@@ -21,32 +29,42 @@ class Track:
     entity_id: int
     state: TrackState
     timestamp: float
-    last_pose: Optional[np.ndarray] = None
     missed: int = 0
 
 
 @dataclass
 class TrackingConf:
-    missed_tracks: int = 5  # kill after this many consecutive misses
+    missed_tracks: int = 3  # kill after this many consecutive misses
     min_points: int = 5  # min points to birth a new track
-    max_dist: float = 3.0  # gating in meters (w/ m_per_rad coupling)
-    m_per_rad: float = 2.0  # convert rad -> “meters” in pose metric
+    max_dist: float = 0.8  # gating in meters (w/ m_per_rad coupling)
+    m_per_rad: float = 4.0  # convert rad -> “meters” in pose metric
     w_shape: float = 0.3  # weight on relative size deviation
     shape_gate: float = 0.6  # max allowed avg relative size mismatch
-    dt_default: float = 1.0  # fallback Δt
+    dt_default: float = 0.1  # fallback Δt
 
 
-# ----------------- Tracker -----------------
+def _pose_err(Ta, Tb, m_per_rad=2.0):
+    # translational & angular error, plus your coupled metric
+
+    Ra, ta = Ta[:3, :3], Ta[:3, 3]
+    Rb, tb = Tb[:3, :3], Tb[:3, 3]
+    # translation
+    et = float(np.linalg.norm(tb - ta))
+    # rotation angle
+    tr = np.clip(np.trace(Ra.T @ Rb), -1.0, 3.0)
+    ang = float(np.arccos(0.5 * (tr - 1.0)))  # radians
+    # coupled metric
+    d = pose_distance_SE3(Ta, Tb, lambda_m_per_rad=m_per_rad)
+    return et, degrees(ang), d
 
 
 class Tracker:
-    def __init__(self, conf: TrackingConf, viewer) -> None:
+    def __init__(self, conf: TrackingConf) -> None:
         self.conf = conf
         self.next_entity_id = 0
         self.tracks: List[Track] = []
-        self.viewer = viewer
+        self.M = 1e9
 
-    # ---- math helpers ----
     def _prediction(
         self, pose: np.ndarray, twist_hat: np.ndarray, dt: float
     ) -> np.ndarray:
@@ -62,8 +80,11 @@ class Tracker:
         return TrackState(pose=pose, twist=twist_hat, shape_size=shape_size)
 
     def _extract_pose(self, cluster: Cluster) -> np.ndarray:
+        """
+        Pose extraction from cluster
+        """
         c = cluster.geometry.centroid
-        R = cluster.geometry.rotation
+        R = project_to_SO3(cluster.geometry.rotation)
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = c
@@ -73,45 +94,51 @@ class Tracker:
         denom = np.maximum(1e-6, 0.5 * (np.abs(a) + np.abs(b)))
         return float(np.mean(np.abs(a - b) / denom))
 
-    def _gated_cost(self, T_pred, size_pred, T_det, size_det) -> float:
+    def _cost(self, T_pred, size_pred, T_det, size_det) -> float:
         d_pose = pose_distance_SE3(T_pred, T_det, self.conf.m_per_rad)
         d_shape = self._shape_rel_dev(size_pred, size_det)
         if d_pose > self.conf.max_dist or d_shape > self.conf.shape_gate:
-            return np.inf
+            return self.M
         return d_pose + self.conf.w_shape * d_shape
+
+    def check_log_exp(self, T):
+        om, v = log_SE3(T)
+        T2 = exp_SE3(hat_se3(om, v))
+        err = np.linalg.norm(T[:3, 3] - T2[:3, 3]) + np.linalg.norm(
+            T[:3, :3] - T2[:3, :3]
+        )
+        assert err < 1e-3, f"exp/log inconsistency: {err}"
 
     def _estimate_twist_from_pair(
         self, T_prev: np.ndarray, T_now: np.ndarray, dt: float
     ) -> np.ndarray:
-        # T_rel = T_prev^{-1} T_now, then (omega, v) = log_SE3(T_rel)
-        # Per-second twist hat: xi^ = hat_se3(omega/dt, v/dt)
-        T_rel = np.linalg.inv(T_prev) @ T_now
+        T_prev_sanitized = sanitize_T(T_prev)
+        T_now_sanitized = sanitize_T(T_now)
+
+        T_rel = rigid_inverse(T_prev_sanitized) @ T_now_sanitized
         omega, v = log_SE3(T_rel)
         dt_safe = max(float(dt), 1e-6)
+
+        self.check_log_exp(T_rel)
+
         return hat_se3(omega / dt_safe, v / dt_safe)
 
-    # ---- public helpers ----
     def get_predictions(self, dt: float) -> List[np.ndarray]:
         return [
             self._prediction(tr.state.pose, tr.state.twist, dt) for tr in self.tracks
         ]
 
     def solve_assignment(self, C: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        if C.size == 0:
-            return np.array([], dtype=int), np.array([], dtype=int)
         r, c = linear_sum_assignment(C)
         return r, c
 
-    # ---- matching & lifecycle ----
     def _build_cost_matrix(self, detections: List[Cluster], dt: float) -> np.ndarray:
-        print(len(self.tracks))
         preds = self.get_predictions(dt)
-        C = np.full((len(self.tracks), len(detections)), np.inf, dtype=float)
-        print(C.shape)
+        C = np.full((len(self.tracks), len(detections)), self.M, dtype=float)
         for i, (tr, T_pred) in enumerate(zip(self.tracks, preds)):
             for j, cl in enumerate(detections):
                 T_det = self._extract_pose(cl)
-                C[i, j] = self._gated_cost(
+                C[i, j] = self._cost(
                     T_pred, tr.state.shape_size, T_det, cl.geometry.sizes
                 )
         return C
@@ -124,16 +151,13 @@ class Tracker:
             cl = detections[j]
             T_meas = self._extract_pose(cl)
 
-            if tr.last_pose is None:
-                tr.last_pose = tr.state.pose
-
             twist_hat = self._estimate_twist_from_pair(tr.state.pose, T_meas, dt)
             tr.state.twist = twist_hat
 
             tr.state.pose = T_meas
+            self.check_log_exp(T_meas)
             tr.state.shape_size = cl.geometry.sizes
             tr.timestamp += dt
-            tr.last_pose = T_meas
             tr.missed = 0
 
     def _handle_unmatched(self, unmatched_tracks: List[int]):
@@ -149,41 +173,51 @@ class Tracker:
             if npts < self.conf.min_points:
                 continue
             T0 = self._extract_pose(cl)
-            twist0 = np.zeros((4, 4), dtype=float)
+            twist0 = np.zeros((4, 4))
             st = self._make_state(T0, twist0, cl.geometry.sizes)
             self.tracks.append(
                 Track(
                     entity_id=self.next_entity_id,
                     state=st,
-                    timestamp=float(t0),
-                    last_pose=T0.copy(),
+                    timestamp=t0,
                     missed=0,
                 )
             )
             self.next_entity_id += 1
 
     def _prune_dead(self):
-        self.tracks = [tr for tr in self.tracks if tr.missed <= self.conf.missed_tracks]
+        self.tracks = [tr for tr in self.tracks if tr.missed < self.conf.missed_tracks]
 
-    # ---- main ----
     def apply(self, scenes: List[Scene]):
+        def _yaw_from_R(R):
+            # assume Z-up, yaw about +Z. If your axes differ, adapt here.
+            # Uses atan2(sin, cos) from the 2x2 top-left submatrix.
+            return float(np.arctan2(R[1, 0], R[0, 0]))
+
+        def _ang_yaw_deg(Ra, Rb):
+            ya = _yaw_from_R(Ra)
+            yb = _yaw_from_R(Rb)
+            d = ya - yb
+            # wrap to [-pi, pi]
+            d = (d + np.pi) % (2 * np.pi) - np.pi
+            return abs(np.degrees(d))
+
         if not scenes:
             return
 
         # init from first scene
         first = scenes[0]
-        t_first = float(first.timestamp or 0.0)
+        t_first = first.timestamp or 0.0
         self.tracks = []
         for cl in first.scene_clusters or []:
             T0 = self._extract_pose(cl)
-            twist0 = np.zeros((4, 4), dtype=float)
+            twist0 = np.zeros((4, 4))
             st = self._make_state(T0, twist0, cl.geometry.sizes)
             self.tracks.append(
                 Track(
                     entity_id=self.next_entity_id,
                     state=st,
                     timestamp=t_first,
-                    last_pose=T0.copy(),
                     missed=0,
                 )
             )
@@ -199,7 +233,7 @@ class Tracker:
 
             assert current_scene.timestamp is not None
             assert next_scene.timestamp is not None
-            dt = float(next_scene.timestamp - current_scene.timestamp)
+            dt = next_scene.timestamp - current_scene.timestamp
             if not np.isfinite(dt) or dt <= 0:
                 dt = self.conf.dt_default
 
@@ -207,15 +241,14 @@ class Tracker:
 
             # build cost, solve, filter invalid (inf) pairs
             C = self._build_cost_matrix(detections, dt)
-            print(C)
-            M = 1e6
-            inf_indices = np.where(C == np.inf)
-            C[inf_indices] = M
-            print(C)
             rows, cols = self.solve_assignment(C)
             pairs = [
-                (i, j) for i, j in zip(rows.tolist(), cols.tolist()) if C[i, j] < M
+                (i, j) for i, j in zip(rows.tolist(), cols.tolist()) if C[i, j] < self.M
             ]
+
+            print(
+                f"[Frame {k}] #tracks={len(self.tracks)} #dets={len(detections)} #pairs={len(pairs)}"
+            )
 
             matched_tracks = {i for i, _ in pairs}
             matched_dets = {j for _, j in pairs}
@@ -234,14 +267,6 @@ class Tracker:
             )
             self._prune_dead()
 
-            # self.viewer.add_matches(
-            #     prev_scene_index=k - 1,
-            #     next_scene_index=k,
-            #     assignments=pairs,
-            #     predicted_poses=preds,
-            #     track_ids=[tr.entity_id for tr in self.tracks],
-            #     next_clusters=next_scene.scene_clusters,
-            #     predicted_sizes=pred_sizes,
-            # )
+            plot_scene_pair(current_scene, next_scene, pairs)
 
             current_scene = next_scene

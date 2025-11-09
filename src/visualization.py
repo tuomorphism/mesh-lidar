@@ -2,7 +2,6 @@ from __future__ import annotations
 from typing import Sequence, Dict, Optional, Tuple
 import numpy as np
 import open3d as o3d
-from tracking_visualization import MatchOverlay
 
 # Fixed 12 cube edges for the ordering:
 # 0:(l,l,l) 1:(h,l,l) 2:(l,h,l) 3:(l,l,h) 4:(h,h,l) 5:(h,l,h) 6:(l,h,h) 7:(h,h,h)
@@ -86,30 +85,6 @@ class ClusterBBoxViewer:
         # materials-ish (legacy)
         self._point_size = float(point_size)
         self._box_line_width = float(box_line_width)
-
-        self._matches = MatchOverlay(lineset_from_ordered_corners, _CUBE_EDGES)
-
-    # ---- scene upload & caching ----
-
-    def add_matches(
-        self,
-        prev_scene_index: int,
-        next_scene_index: int,
-        assignments,
-        predicted_poses,
-        track_ids,
-        next_clusters,
-        predicted_sizes=None,
-    ):
-        self._matches.add_matches(
-            prev_scene_index,
-            next_scene_index,
-            assignments,
-            predicted_poses,
-            track_ids,
-            next_clusters,
-            predicted_sizes,
-        )
 
     def _colors_from_labels(self, labels: Optional[np.ndarray], N: int) -> np.ndarray:
         if labels is None or len(labels) != N:
@@ -238,10 +213,6 @@ class ClusterBBoxViewer:
         self._remove_all_boxes()
         if self.show_boxes:
             self._add_current_scene_boxes()
-
-        # remove old overlays and add those for this scene (if any)
-        self._matches.clear_active(self.vis)
-        self._matches.add_active(self.vis, self.idx)
 
         # finally, refresh
         self.vis.update_renderer()
