@@ -8,6 +8,34 @@ def _skew(w):
     return np.array([[0, -wz, wy], [wz, 0, -wx], [-wy, wx, 0]], dtype=float)
 
 
+def lin_speed_from_twist(twist_hat: np.ndarray) -> float:
+    vx, vy, vz = twist_hat[0, 3], twist_hat[1, 3], twist_hat[2, 3]
+    return float(np.sqrt(vx * vx + vy * vy + vz * vz))
+
+
+def predict_se2_CTRV(T_w: np.ndarray, v: float, psi: float, psidot: float, dt: float):
+    # Depending on the anlular velocity, we either make approximation of straight line movement
+    # or an approximation of movement along an arc
+    # This is known as Constant Turn Rate and Velocity (CTRV) approximation
+    if abs(psidot) < 1e-4:
+        px = T_w[0, 3] + v * dt * np.cos(psi)
+        py = T_w[1, 3] + v * dt * np.sin(psi)
+        psi_new = psi
+    else:
+        R = v / psidot
+        dpsi = psidot * dt
+        px = T_w[0, 3] + R * (np.sin(psi + dpsi) - np.sin(psi))
+        py = T_w[1, 3] - R * (np.cos(psi + dpsi) - np.cos(psi))
+        psi_new = psi + dpsi
+
+    # write back into a 4x4 SE(2) pose
+    Tp = T_w.copy()
+    c, s = np.cos(psi_new), np.sin(psi_new)
+    Tp[:3, :3] = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    Tp[0, 3], Tp[1, 3] = px, py
+    return Tp
+
+
 def project_to_SO3(R):
     U, _, Vt = np.linalg.svd(R)
     Rn = U @ Vt

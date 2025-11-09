@@ -47,9 +47,6 @@ def bbox_diag_length_from_minmax(bb2: np.ndarray) -> float:
     return float(np.linalg.norm(bb2[1] - bb2[0]))
 
 
-# ---- viewer ----
-
-
 class ClusterBBoxViewer:
     """
     Simple Open3D legacy viewer:
@@ -60,7 +57,8 @@ class ClusterBBoxViewer:
 
     def __init__(
         self,
-        scenes: Sequence,  # your Scene type
+        scenes: Sequence,
+        entity_ids: list[np.ndarray] = [],
         min_diag: float = 0.1,
         max_diag: float = 1e6,
         point_size: float = 2.0,
@@ -86,7 +84,10 @@ class ClusterBBoxViewer:
         self._point_size = float(point_size)
         self._box_line_width = float(box_line_width)
 
+        self.entity_ids = entity_ids
+
     def _colors_from_labels(self, labels: Optional[np.ndarray], N: int) -> np.ndarray:
+        print(labels)
         if labels is None or len(labels) != N:
             return np.full((N, 3), 0.75, float)
         labels = labels.astype(int, copy=False)
@@ -181,6 +182,7 @@ class ClusterBBoxViewer:
 
         # colors
         labels = getattr(s, "cluster_labels", None)
+        labels = self.entity_ids[self.idx]
         cols = self._colors_from_labels(
             (
                 labels[good]
