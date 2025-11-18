@@ -2,6 +2,9 @@ from __future__ import annotations
 from typing import Sequence, Dict, Optional, Tuple
 import numpy as np
 import open3d as o3d
+import matplotlib as mpl
+
+from lidar_types import Scene
 
 # Fixed 12 cube edges for the ordering:
 # 0:(l,l,l) 1:(h,l,l) 2:(l,h,l) 3:(l,l,h) 4:(h,h,l) 5:(h,l,h) 6:(l,h,h) 7:(h,h,h)
@@ -57,7 +60,7 @@ class ClusterBBoxViewer:
 
     def __init__(
         self,
-        scenes: Sequence,
+        scenes: list[Scene],
         entity_ids: list[np.ndarray] = [],
         min_diag: float = 0.1,
         max_diag: float = 1e6,
@@ -66,7 +69,7 @@ class ClusterBBoxViewer:
     ):
         if not scenes:
             raise ValueError("Provide at least one scene")
-        self.scenes = list(scenes)
+        self.scenes = scenes
         self.idx = 0
         self.min_diag = float(min_diag)
         self.max_diag = float(max_diag)
@@ -86,8 +89,9 @@ class ClusterBBoxViewer:
 
         self.entity_ids = entity_ids
 
+        self.mode = 1  # Track visualization, 1 if velocity field
+
     def _colors_from_labels(self, labels: Optional[np.ndarray], N: int) -> np.ndarray:
-        print(labels)
         if labels is None or len(labels) != N:
             return np.full((N, 3), 0.75, float)
         labels = labels.astype(int, copy=False)
@@ -113,6 +117,12 @@ class ClusterBBoxViewer:
         cols = np.full((N, 3), 0.6, float)
         cols[valid] = pal[labels[valid] % len(pal)]
         return cols
+
+    def _color_from_float(self, values: np.ndarray) -> np.ndarray:
+        colormap = mpl.colormaps.get("plasma", None)
+        if colormap is not None:
+            return np.asarray(colormap(values)[:, :3])
+        return np.full((values.shape[0], 3), 0.75, float)
 
     def _compute_boxes_for_scene(self, s_idx: int):
         if s_idx in self._scene_box_cache:
@@ -174,7 +184,6 @@ class ClusterBBoxViewer:
         self.idx = max(0, min(idx, len(self.scenes) - 1))
         s = self.scenes[self.idx]
 
-        # points (drop NaNs/Infs defensively)
         pts_all = np.asarray(s.points[:, :3], dtype=np.float64)
         good = np.isfinite(pts_all).all(axis=1)
         pts = pts_all[good]
@@ -183,14 +192,24 @@ class ClusterBBoxViewer:
         # colors
         labels = getattr(s, "cluster_labels", None)
         labels = self.entity_ids[self.idx]
-        cols = self._colors_from_labels(
-            (
-                labels[good]
-                if (labels is not None and len(labels) == len(pts_all))
-                else None
-            ),
-            len(pts),
-        )
+
+        print(s.velocity_field)
+        velocities = getattr(s, "velocity_field", np.zeros((pts.shape[0], 3)))
+        print(velocities)
+        velocities = np.linalg.norm(velocities, axis=1)
+        if self.mode == 0:
+            cols = self._colors_from_labels(
+                (
+                    labels[good]
+                    if (labels is not None and len(labels) == len(pts_all))
+                    else None
+                ),
+                len(pts),
+            )
+        elif self.mode == 1 and velocities is not None:
+            cols = self._color_from_float(velocities)
+        else:
+            cols = np.full((pts.shape[0], 3), 0.6, float)
         self.pcd.colors = o3d.utility.Vector3dVector(cols)
 
         if self._added:

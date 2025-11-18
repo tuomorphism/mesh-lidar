@@ -1,12 +1,6 @@
 import numpy as np
-from sklearn.cluster import DBSCAN
+from scene_processing.scanning import DbscanConfig, dbscan_3d
 from lidar_types import ClusterGeometry, Scene, Cluster
-
-
-def _cluster_scene_dbscan(points: np.ndarray, voxel_eps: float = 1.0) -> np.ndarray:
-    clustering = DBSCAN(eps=voxel_eps)
-    clustering = clustering.fit(points)
-    return clustering.labels_
 
 
 def compute_yaw_obb(points: np.ndarray, eps: float = 1e-6):
@@ -109,22 +103,28 @@ def _compute_cluster_geometry(cluster_data: np.ndarray) -> ClusterGeometry:
     )
 
 
-def compute_clusters(scene: Scene) -> Scene:
+def compute_clusters_flow(scene: Scene, flow: np.ndarray) -> Scene:
     """
-    Obtains clusters from a single scene. Returns a Scene object with set clusters
+    Obtains clusters from a scene and a scene flow. Returns a Scene object with set clusters
     """
-    raw_clusters = _cluster_scene_dbscan(scene.points[:, :3], voxel_eps=2.0)
+    raw_clusters = dbscan_3d(
+        scene.points[:, :3],
+        DbscanConfig(voxel_size=0.8, eps_factor=1.6, min_samples=8),
+    )
+
     cluster_labels = np.unique(raw_clusters)
     scene_clusters: list[Cluster] = []
     for c in cluster_labels:
         correct_mask = np.nonzero(raw_clusters == c)[0]
-        if correct_mask.shape[0] <= 10:  # Remove small clusters
-            continue
         cluster_points = scene.points[correct_mask, :]
         cluster_geo = _compute_cluster_geometry(cluster_points)
         cluster = Cluster(
             member_indices=correct_mask.tolist(), geometry=cluster_geo, label=c
         )
+
+        # Filter some clusters based on geometry
+        if np.any(cluster.geometry.sizes <= 0.4):
+            continue
 
         scene_clusters.append(cluster)
 

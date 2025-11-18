@@ -1,12 +1,10 @@
 from dataclasses import dataclass, field
-from os import pread
 from typing import List, Tuple, Optional
-from flask.cli import F
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from lidar_types import Scene, Cluster
-from pose_calculations import (
+from tracking.pose_calculations import (
     pose_distance_SE3,
     exp_SE3,
     log_SE3,
@@ -17,7 +15,6 @@ from pose_calculations import (
     lin_speed_from_twist,
     predict_se2_CTRV,
 )
-from tracking_plot import plot_scene_pair
 
 
 @dataclass
@@ -142,6 +139,8 @@ class Tracker:
 
         preds = []
         for tr in self.tracks:
+
+            # Using CTRV estimation since we approximate roll and pitch to be neglible.
             vx = tr.state.twist[0, 3]
             vy = tr.state.twist[1, 3]
             v = float(np.hypot(vx, vy))
@@ -423,7 +422,6 @@ class Tracker:
                 )
 
             # keep your existing viz
-            plot_scene_pair(current_scene, next_scene, pairs)
             current_scene = next_scene
 
         result.tracks = list(self.tracks)

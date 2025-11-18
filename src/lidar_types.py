@@ -54,6 +54,7 @@ class Scene:
     ground_plane: np.ndarray
     scene_clusters: Optional[list[Cluster]] = None
     timestamp: Optional[float] = None
+    velocity_field: Optional[np.ndarray] = None
 
     @property
     def cluster_membership(self) -> dict[int, Cluster]:

@@ -1,13 +1,13 @@
 from pathlib import Path
-from visualization import ClusterBBoxViewer, view_cluster_bboxes
-from loader import load_sweeps
-from processor import process_sweeps
-from tracking import Tracker, TrackingConf
+from visualization.visualization import ClusterBBoxViewer, view_cluster_bboxes
+from scene_processing.loader import load_sweeps
+from scene_processing.processor import process_sweeps
+from tracking.tracking import Tracker, TrackingConf
 
 
 if __name__ == "__main__":
     root = Path("./data/lidar1/")
-    N = 64
+    N = 16
     scene_indices = [6 + i for i in range(N)]
     sweep_data = load_sweeps(
         root, 0, 1, scene_indices, Path("./data/meta/sample_data.json")
