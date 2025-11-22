@@ -1,11 +1,12 @@
 from pathlib import Path
+import open3d as o3d
+import numpy as np
+
+
 from visualization.visualization import ClusterBBoxViewer, view_cluster_bboxes
 from scene_processing.loader import load_sequence_timesynced
 from scene_processing.processor import process_sweeps
 from tracking.tracking import Tracker, TrackingConf
-
-import numpy as np
-import open3d as o3d
 from lidar_types import Sweep
 from fusion import fuse_sweeps_in_world
 
@@ -65,23 +66,26 @@ def visualize_sweep(
 
 
 def main():
-    # datasets/UrbanIng-V2X/dataset/20241126_0017_crossing1_00/timesync_info.csv
     root = Path("./datasets/UrbanIng-V2X/dataset/20241126_0017_crossing1_00")
-    N = 128
+    N = 200
     sweep_data = load_sequence_timesynced(root)
-
-    # print(sweep_data)
-
     timestamps = list(sweep_data.keys())
 
+    print(f"Number of frames {len(timestamps)}.")
+
     combined_sweeps = []
-    for ts in timestamps:
-        sweep_1 = sweep_data[ts]["crossing1_11_lidar"]
-        sweep_2 = sweep_data[ts]["crossing1_12_lidar"]
-        combined_sweep = fuse_sweeps_in_world([sweep_1, sweep_2])
+    total_point_count = 0
+    for ts in timestamps[:N]:
+        sweep_11 = sweep_data[ts]["crossing1_11_lidar"]
+        sweep_12 = sweep_data[ts]["crossing1_12_lidar"]
+
+        sweep_31 = sweep_data[ts]["crossing1_31_lidar"]
+        sweep_32 = sweep_data[ts]["crossing1_32_lidar"]
+        combined_sweep = fuse_sweeps_in_world([sweep_11, sweep_12, sweep_31, sweep_32])
         combined_sweeps.append(combined_sweep)
 
-    # visualize_sweep(combined_sweep)
+        total_point_count += combined_sweep.pts.shape[0]
+        print(f"Total point count: {total_point_count} points")
 
     processed = process_sweeps(combined_sweeps[:N])
 

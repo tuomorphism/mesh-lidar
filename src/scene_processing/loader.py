@@ -69,7 +69,6 @@ def load_sequence_timesynced(
             if not filename:
                 continue
 
-            # check if a stationary lidar sensor
             if not (
                 sensor_name.endswith(lidar_suffix)
                 and sensor_name.startswith("crossing")

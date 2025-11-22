@@ -1,6 +1,7 @@
 import numpy as np
-from scene_processing.scanning import DbscanConfig, dbscan_3d
 from lidar_types import ClusterGeometry, Scene, Cluster
+from scene_processing.config import Config
+from scene_processing.scanning import DbscanConfig, dbscan_3d
 
 
 def compute_yaw_obb(points: np.ndarray, eps: float = 1e-6):
@@ -78,7 +79,9 @@ def _world_from_local(
 
 
 def _compute_cluster_geometry(cluster_data: np.ndarray) -> ClusterGeometry:
-    assert cluster_data.shape[1] == 4
+    assert (
+        cluster_data.shape[1] == 4
+    ), f"cluster data has shape {cluster_data.shape} instead of (N, 4)!"
     # Separate the 3d data from other variables
     cluster_points = cluster_data[:, :3]
 
@@ -103,31 +106,97 @@ def _compute_cluster_geometry(cluster_data: np.ndarray) -> ClusterGeometry:
     )
 
 
-def compute_clusters_flow(scene: Scene, flow: np.ndarray) -> Scene:
-    """
-    Obtains clusters from a scene and a scene flow. Returns a Scene object with set clusters
-    """
-    raw_clusters = dbscan_3d(
-        scene.points[:, :3],
-        DbscanConfig(voxel_size=0.8, eps_factor=1.6, min_samples=8),
+def merge_close_clusters(scene: Scene) -> Scene:
+    clusters = scene.scene_clusters or []
+    if not clusters:
+        return scene
+
+    centers = np.array([c.geometry.centroid for c in clusters])
+    N = len(clusters)
+    adj = np.zeros((N, N), dtype=bool)
+
+    for i in range(N):
+        for j in range(i + 1, N):
+            d = np.linalg.norm(centers[i][:2] - centers[j][:2])  # XY distance
+            if d < Config.merge_gap_threshold:
+                adj[i, j] = adj[j, i] = True
+
+    # connected components on this adjacency → merged clusters
+    visited = np.zeros(N, dtype=bool)
+    merged: list[Cluster] = []
+
+    for i in range(N):
+        if visited[i]:
+            continue
+        # BFS/DFS to collect component
+        stack = [i]
+        comp_idx = []
+        visited[i] = True
+        while stack:
+            k = stack.pop()
+            comp_idx.append(k)
+            for j in np.where(adj[k])[0]:
+                if not visited[j]:
+                    visited[j] = True
+                    stack.append(j)
+
+        # merge member indices and recompute geometry
+        member_indices = np.concatenate([clusters[k].member_indices for k in comp_idx])
+        pts = scene.points[member_indices]
+        geom = _compute_cluster_geometry(pts)
+        merged.append(Cluster(member_indices=member_indices.tolist(), geometry=geom))
+
+    return Scene(
+        points=scene.points,
+        ground_plane=scene.ground_plane,
+        scene_clusters=merged,
+        timestamp=scene.timestamp,
+        velocity_field=scene.velocity_field,
     )
 
-    cluster_labels = np.unique(raw_clusters)
-    scene_clusters: list[Cluster] = []
-    for c in cluster_labels:
-        correct_mask = np.nonzero(raw_clusters == c)[0]
-        cluster_points = scene.points[correct_mask, :]
-        cluster_geo = _compute_cluster_geometry(cluster_points)
-        cluster = Cluster(
-            member_indices=correct_mask.tolist(), geometry=cluster_geo, label=c
+
+def compute_clusters_geom(
+    scene: Scene,
+) -> Scene:
+    pts = scene.points
+    if pts.size == 0:
+        return scene
+
+    xyz = pts[:, :3]
+    scaled_xyz = xyz * Config.clustering_scale
+
+    labels = dbscan_3d(
+        scaled_xyz,
+        DbscanConfig(
+            eps=Config.eps_factor * Config.voxel_size,
+            min_samples=Config.min_samples,
+            leaf_size=40,
+            n_jobs=-1,
+        ),
+    )
+
+    clusters: list[Cluster] = []
+    for c_id in np.unique(labels):
+        if c_id == -1:
+            continue  # DBSCAN "noise"
+        idx = np.where(labels == c_id)[0]
+        if idx.size < Config.min_samples:
+            continue  # *really* tiny garbage, OK to drop
+
+        geom = _compute_cluster_geometry(pts[idx])
+        clusters.append(
+            Cluster(
+                member_indices=idx.tolist(),
+                geometry=geom,
+            )
         )
 
-        # Filter some clusters based on geometry
-        if np.any(cluster.geometry.sizes <= 0.4):
-            continue
-
-        scene_clusters.append(cluster)
-
-    scene.scene_clusters = scene_clusters
-
-    return scene
+    clustered_scene = Scene(
+        points=scene.points,
+        ground_plane=scene.ground_plane,
+        scene_clusters=clusters,
+        timestamp=scene.timestamp,
+        velocity_field=scene.velocity_field,
+    )
+    merged_clusters = merge_close_clusters(clustered_scene)
+    return merged_clusters

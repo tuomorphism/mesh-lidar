@@ -41,7 +41,7 @@ def transform_sweep(
     log_applied_transform: bool = True,
 ) -> Sweep:
     """
-    Apply a homogeneous transform to a Sweep and return a NEW Sweep.
+    Apply a homogeneous transform to a Sweep and return a new Sweep in transformed coordinates.
 
     Parameters
     ----------
@@ -125,13 +125,13 @@ def fuse_sweeps_in_world(sweeps: Sequence[Sweep]) -> Sweep:
     pts_fused = np.vstack(pts_list)
 
     sensors = [s.metadata.get("sensor") for s in sweeps]
-    timestamps = [s.metadata.get("timestamp_ms") for s in sweeps]
+    timestamps = [s.metadata.get("timestamp_ms", 0) for s in sweeps]
 
     fused_metadata: Dict[str, Any] = {
         "frame": "world",
         "sensors": sensors,
         "timestamps_ms": timestamps,
-        "timestamp": timestamps[0],
+        "timestamp": timestamps[0] / 1000.0,
         "num_inputs": len(sweeps),
     }
 
@@ -139,7 +139,7 @@ def fuse_sweeps_in_world(sweeps: Sequence[Sweep]) -> Sweep:
         {
             "sensor": s.metadata.get("sensor"),
             "timestamp_ms": s.metadata.get("timestamp_ms"),
-            "timestamp": s.metadata.get("timestamp_ms"),
+            "timestamp": s.metadata.get("timestamp_ms", 0) / 1000.0,
             "filename": s.metadata.get("filename"),
             "path": s.metadata.get("path"),
             "frame_in": s.frame,

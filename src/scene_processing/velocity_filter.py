@@ -1,8 +1,9 @@
 import numpy as np
 from scipy.spatial import KDTree
+from scene_processing.config import Config
 
 
-def nn_flow(X, Y, dt, max_dist=2.0):
+def nn_flow(X, Y, dt):
     """
     Very simple nearest-neighbour scene flow.
 
@@ -24,12 +25,14 @@ def nn_flow(X, Y, dt, max_dist=2.0):
     dists, idxs = tree.query(X, k=1)
 
     # Max dist
-    valid = dists < max_dist
+    valid = dists < Config.velocity_max_dist
     disp = np.full_like(X, np.nan)
     vel = np.full_like(X, np.nan)
 
     # Displacement and velocities, simple finite difference velocity estimation v = d / t.
     disp[valid] = Y[idxs[valid]] - X[valid]
     vel[valid] = disp[valid] / max(dt, 1e-6)
+
+    vel[~valid] = 0.0
 
     return vel, valid

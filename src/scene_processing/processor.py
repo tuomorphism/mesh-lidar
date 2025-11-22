@@ -2,102 +2,162 @@ import numpy as np
 import open3d as o3d
 
 from lidar_types import Scene, Cluster, Sweep
-from scene_processing.clustering import compute_clusters_flow
+from scene_processing.clustering import compute_clusters_geom
 from scene_processing.velocity_filter import nn_flow
+from scene_processing.config import Config
 
 
-def preprocess(points: np.ndarray, voxel_size=0.10, metadata: dict = {}) -> Scene:
+def voxel_downsample_with_intensity(points):
+    xyz = points[:, :3]
+    feat = points[:, 3:]
+
+    coords = np.floor(xyz / Config.voxel_size).astype(np.int32)
+    keys = (
+        coords[:, 0].astype(np.int64) * 73856093
+        + coords[:, 1].astype(np.int64) * 19349663
+        + coords[:, 2].astype(np.int64) * 83492791
+    )
+
+    uniq_keys, inv = np.unique(keys, return_inverse=True)
+    M = len(uniq_keys)
+
+    ds_xyz = np.zeros((M, 3), dtype=np.float32)
+    ds_feat = np.zeros((M, feat.shape[1]), dtype=np.float32)
+
+    np.add.at(ds_xyz, inv, xyz)  # accumulate xyz sums
+    np.add.at(ds_feat, inv, feat)  # accumulate feature sums
+
+    counts = np.bincount(inv).astype(np.float32)
+    ds_xyz /= counts[:, None]
+    ds_feat /= counts[:, None]
+
+    return np.hstack([ds_xyz, ds_feat])
+
+
+def estimate_normals_o3d(
+    pcd: o3d.geometry.PointCloud,
+    radius: float = 0.5,
+    max_nn: int = 30,
+):
+    """Estimate normals using Open3D KD-tree."""
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=max_nn)
+    )
+    pcd.normalize_normals()
+    return pcd
+
+
+def preprocess(
+    i: int,
+    points: np.ndarray,
+    metadata: dict = {},
+) -> Scene:
     """
-    preprocessing of sweep points before clustering
+    Downsample [x,y,z,i,...], remove ground with RANSAC, return Scene with DS non-ground.
     """
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points[:, :3])
+    assert points.ndim == 2 and points.shape[1] >= 3
+    print(f"Preprocessing index {i}.")
 
-    # Estimating ground
-    # ground_plane, ground_points = pcd.segment_plane(
-    #     distance_threshold=5 * voxel_size, ransac_n=20, num_iterations=100
-    # )
-    # mask = np.ones(points.shape[0], dtype=bool)
-    # mask[ground_points] = False
+    ds_points = voxel_downsample_with_intensity(points)
+    if ds_points.shape[0] == 0:
+        D = points.shape[1]
+        return Scene(
+            points=np.empty((0, D)),
+            ground_plane=np.empty((0, D)),
+            timestamp=metadata.get("timestamp"),
+        )
 
-    # non_ground_points = points[mask, :]
+    pcd_ds = o3d.geometry.PointCloud()
+    pcd_ds.points = o3d.utility.Vector3dVector(ds_points[:, :3])
+
+    _, inliers = pcd_ds.segment_plane(
+        distance_threshold=0.4,
+        ransac_n=5,
+        num_iterations=300,
+    )
+
+    inliers = np.asarray(inliers, dtype=int)
+    mask = np.zeros(ds_points.shape[0], dtype=bool)
+    mask[inliers] = True
+
+    ds_ground = ds_points[mask]
+    ds_non_ground = ds_points[~mask]
 
     return Scene(
-        points=points,
-        ground_plane=np.empty_like(points),
+        points=ds_non_ground,  # [x,y,z,intensity,...] non-ground, already DS
+        ground_plane=ds_ground,
         timestamp=metadata.get("timestamp"),
     )
 
 
 def postprocess(scene: Scene) -> Scene:
     """
-    postprocessing of scene after clustering
+    - Drop only very small clusters (noise).
+    - Assign cluster.label to hint at type:
+        0 = unknown / generic
+        1 = likely moving object (car/ped/etc.)
+        2 = likely static background (wall, façade, pole)
     """
+    if scene.scene_clusters is None:
+        return scene
 
-    def _filter_cluster(cluster: Cluster) -> bool:
-        if cluster.geometry.cov.diagonal().sum() > 100:
-            return False
-        return True
+    filtered: list[Cluster] = []
+    for c in scene.scene_clusters:
+        n = len(c.member_indices)
+        if n < Config.min_samples:  # tiny splats, OK to drop
+            continue
 
-    filtered_clusters = []
-    for cluster in scene.scene_clusters or []:
-        if _filter_cluster(cluster) is True:
-            filtered_clusters.append(cluster)
+        sizes = c.geometry.sizes  # extents in local bbox
+        lx, ly, lz = sizes
+        max_extent = sizes.max()
+        min_extent = sizes.min()
 
-    scene = Scene(
+        # simple heuristics for type of cluster
+        is_very_large = max_extent > 25.0
+        is_very_tall = lz > 6.0
+        is_flat_wall_like = (lz > 2.5) and (max_extent / max(min_extent, 0.1) > 20.0)
+
+        # car / truck / ped sizes – totally hand-wavy, just to start
+        is_object_sized = (
+            0.3 <= lx <= 10.0
+            and 0.3 <= ly <= 10.0
+            and 0.5 <= lz <= 4.5
+            and not is_flat_wall_like
+        )
+
+        if is_object_sized:
+            c.label = 1  # likely dynamic object
+        elif is_flat_wall_like or is_very_large or is_very_tall:
+            c.label = 2  # likely static background structure
+        else:
+            c.label = 0  # unknown / misc
+
+        filtered.append(c)
+
+    return Scene(
         points=scene.points,
         ground_plane=scene.ground_plane,
-        scene_clusters=filtered_clusters,
+        scene_clusters=filtered,
         timestamp=scene.timestamp,
         velocity_field=scene.velocity_field,
     )
-    return scene
 
 
-def _cluster_scene_pair(
-    _: int,
-    current_preprocessed: Scene,
-    next_preprocessed: Scene,
-) -> Scene:
-
-    assert hasattr(current_preprocessed, "timestamp") and hasattr(
-        next_preprocessed, "timestamp"
-    ), "scenes should have timestamps!"
-    assert (
-        current_preprocessed.timestamp is not None
-        and next_preprocessed.timestamp is not None
+def _cluster_scene_pair(i: int, A: Scene, B: Scene) -> Scene:
+    print(f"Processing pair {i}, {i + 1}")
+    dt = (
+        B.timestamp - A.timestamp
+        if A.timestamp is not None and B.timestamp is not None
+        else Config.delta_t_fallback
     )
+    vel, _ = nn_flow(A.points[:, :3], B.points[:, :3], dt=dt, max_dist=3)
 
-    dt = next_preprocessed.timestamp - current_preprocessed.timestamp
-
-    if next_preprocessed is not None:
-        vel_flow, valid_mask = nn_flow(
-            current_preprocessed.points[:, :3],
-            next_preprocessed.points[:, :3],
-            dt=dt,
-            max_dist=3,
-        )
-    else:
-        vel_flow = np.zeros_like(current_preprocessed.points)
-        valid_mask = np.ones_like(vel_flow, dtype=bool)
-
-    clustered = compute_clusters_flow(current_preprocessed, vel_flow)
-    postprocessed = postprocess(clustered)
-    postprocessed.velocity_field = vel_flow
-    return postprocessed
+    clustered = compute_clusters_geom(A)
+    out = postprocess(clustered)
+    out.velocity_field = vel
+    return out
 
 
 def process_sweeps(sweeps: list[Sweep]) -> list[Scene]:
-    """
-    Processes a list of sweep data into Scene objects.
-    """
-
-    preprocessed = list(map(lambda x: preprocess(x.pts, metadata=x.metadata), sweeps))
-    clustered = list(
-        map(
-            lambda i: _cluster_scene_pair(i, preprocessed[i], preprocessed[i + 1]),
-            range(len(preprocessed) - 1),
-        )
-    )
-    postprocessed = list(map(postprocess, clustered))
-    return postprocessed
+    pre = [preprocess(i, s.pts, metadata=s.metadata) for i, s in enumerate(sweeps)]
+    return [_cluster_scene_pair(i, pre[i], pre[i + 1]) for i in range(len(pre) - 1)]
