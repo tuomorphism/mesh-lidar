@@ -89,7 +89,7 @@ class ClusterBBoxViewer:
 
         self.entity_ids = entity_ids
 
-        self.mode = 1  # Track visualization, 1 if velocity field
+        self.mode = 0  # Track visualization, 1 if velocity field
 
     def _colors_from_labels(self, labels: Optional[np.ndarray], N: int) -> np.ndarray:
         if labels is None or len(labels) != N:
@@ -193,9 +193,7 @@ class ClusterBBoxViewer:
         labels = getattr(s, "cluster_labels", None)
         labels = self.entity_ids[self.idx]
 
-        print(s.velocity_field)
         velocities = getattr(s, "velocity_field", np.zeros((pts.shape[0], 3)))
-        print(velocities)
         velocities = np.linalg.norm(velocities, axis=1)
         if self.mode == 0:
             cols = self._colors_from_labels(

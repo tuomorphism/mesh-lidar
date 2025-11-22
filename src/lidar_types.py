@@ -1,16 +1,33 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, Any
 import numpy as np
 
 
 @dataclass
 class Sweep:
     """
-    Dataclass for containing Sweep loader data
+    Represents a LiDAR sweep.
+
+    pts: (N, 4) or (N, D) ndarray
+        Columns: [x, y, z, ...] where extra columns can be intensity/ring/etc.
+    metadata: dict
+        Arbitrary metadata, expected to contain at least:
+        - 'timestamp_ms'
+        - 'sensor'
+        - extrinsics info (see below)
     """
 
     pts: np.ndarray
-    metadata: dict
+    metadata: Dict[str, Any]
+
+    @property
+    def frame(self) -> str:
+        """
+        Name of the coordinate frame this sweep's points are expressed in.
+
+        Defaults to 'sensor' if not present.
+        """
+        return self.metadata.get("frame", "sensor")
 
 
 @dataclass

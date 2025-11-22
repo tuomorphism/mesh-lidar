@@ -14,17 +14,17 @@ def preprocess(points: np.ndarray, voxel_size=0.10, metadata: dict = {}) -> Scen
     pcd.points = o3d.utility.Vector3dVector(points[:, :3])
 
     # Estimating ground
-    ground_plane, ground_points = pcd.segment_plane(
-        distance_threshold=5 * voxel_size, ransac_n=20, num_iterations=100
-    )
-    mask = np.ones(points.shape[0], dtype=bool)
-    mask[ground_points] = False
+    # ground_plane, ground_points = pcd.segment_plane(
+    #     distance_threshold=5 * voxel_size, ransac_n=20, num_iterations=100
+    # )
+    # mask = np.ones(points.shape[0], dtype=bool)
+    # mask[ground_points] = False
 
-    non_ground_points = points[mask, :]
+    # non_ground_points = points[mask, :]
 
     return Scene(
-        points=non_ground_points,
-        ground_plane=ground_plane,
+        points=points,
+        ground_plane=np.empty_like(points),
         timestamp=metadata.get("timestamp"),
     )
 

@@ -78,7 +78,7 @@ def _world_from_local(
 
 
 def _compute_cluster_geometry(cluster_data: np.ndarray) -> ClusterGeometry:
-    assert cluster_data.shape[1] == 5
+    assert cluster_data.shape[1] == 4
     # Separate the 3d data from other variables
     cluster_points = cluster_data[:, :3]
 

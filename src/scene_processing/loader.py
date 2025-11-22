@@ -1,99 +1,110 @@
-from pathlib import Path
+import csv
 import json
+from pathlib import Path
 import numpy as np
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
 from lidar_types import Sweep
 
 
 def _load_lidar_npz(path: Path) -> np.ndarray:
+    data = np.load(path, allow_pickle=True)
+    x_values = data["x"]
+    y_values = data["y"]
+    z_values = data["z"]
+    int_values = data["intensity"]
+    return np.column_stack([x_values, y_values, z_values, int_values])
+
+
+def load_timesync_matrix(path: Path) -> List[List[str]]:
+    with open(path, "r") as f:
+        reader = csv.reader(f)
+        return [row for row in reader]
+
+
+def load_calibration(path: Path) -> Dict[str, dict]:
     """
-    Load one UrbanIng-V2X LiDAR npz file.
-    Assumes it contains either:
-        - points under key 'points'
-        - or the first array in the archive
+    loads calibration jsonfile from path
     """
-    data = np.load(path)
-    if "points" in data:
-        pts = data["points"]
-    else:
-        # Fallback: first array
-        pts = next(iter(data.values()))
-    return pts
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def _load_sample_metadata(metadata_path: Path) -> Dict[str, dict]:
-    with open(metadata_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    return {item["filename"]: item for item in raw}
+def _extract_extrinsic_matrix(block: dict) -> Optional[np.ndarray]:
+    """Extract the first 4×4 extrinsic matrix in the block."""
+    if "extrinsics" not in block:
+        return None
+    for _, value in block["extrinsics"].items():
+        mat = np.array(value)
+        if mat.shape == (4, 4):
+            return mat
+    return None
 
 
-def _get_lidar_folders(sequence_path: Path) -> List[Path]:
-    """
-    Returns all LiDAR sensor folders inside a sequence:
-    e.g. lidar_01, lidar_02, ...
-    """
-    return sorted(
-        [
-            p
-            for p in sequence_path.iterdir()
-            if p.is_dir() and p.name.startswith("lidar")
-        ]
-    )
+def load_sequence_timesynced(
+    sequence_root: Path,
+    lidar_suffix: str = "_lidar",
+    max_frames: Optional[int] = None,
+) -> Dict[int, Dict[str, Sweep]]:
 
+    matrix = load_timesync_matrix(sequence_root / "timesync_info.csv")
 
-def _get_lidar_files(lidar_dir: Path) -> List[Path]:
-    """
-    Returns all .npz files in time order.
-    """
-    files = sorted(lidar_dir.glob("*.npz"))
-    return files
+    sensors = [row[0] for row in matrix[1:]]
+    timestamp_row = matrix[1]
+    timestamps = [int(x) for x in timestamp_row[1:]]
 
+    calib = load_calibration(sequence_root / "calibration.json")
+    timeline: Dict[int, Dict[str, Sweep]] = {}
 
-def _load_sweep(
-    file_path: Path,
-    metadata_dict: Optional[Dict[str, dict]] = None,
-) -> Sweep:
-    pts = _load_lidar_npz(file_path)
+    num_loaded = 0
 
-    # Relative path key for metadata lookup, same as V2X-Sim loader style
-    key = str(file_path.name)
-    metadata = metadata_dict.get(key) if metadata_dict is not None else {}
+    for j, ts in enumerate(timestamps):
+        if max_frames is not None and num_loaded >= max_frames:
+            break
 
-    return Sweep(pts, metadata)
+        frame_dict: Dict[str, Sweep] = {}
 
+        for i, sensor_name in enumerate(sensors, start=1):
+            filename = matrix[i][j + 1]
+            if not filename:
+                continue
 
-def load_sequence(
-    root: Path,
-    sequence_id: str,
-    metadata_path: Optional[Path] = None,
-) -> Dict[str, List[Sweep]]:
-    """
-    Load all sweeps from a sequence, for all lidar sensors.
+            # check if a stationary lidar sensor
+            if not (
+                sensor_name.endswith(lidar_suffix)
+                and sensor_name.startswith("crossing")
+            ):
+                continue
 
-    Returns dict:
-        {
-            "lidar_01": [Sweep, Sweep, ...],
-            "lidar_02": [Sweep, Sweep, ...],
-            ...
-        }
-    """
-    seq_path = root / sequence_id
-    assert seq_path.exists(), f"Sequence not found: {seq_path}"
+            sensor_dir = sequence_root / sensor_name
+            file_path = sensor_dir / filename
+            if not file_path.exists():
+                continue
 
-    # Metadata optional
-    metadata_dict = (
-        _load_sample_metadata(metadata_path) if metadata_path is not None else None
-    )
+            pts = _load_lidar_npz(file_path)
 
-    lidar_folders = _get_lidar_folders(seq_path)
+            metadata = {
+                "timestamp_ms": ts,
+                "timestamp": ts,
+                "sensor": sensor_name,
+                "filename": filename,
+                "path": str(file_path),
+            }
 
-    output = {}
+            if sensor_name in calib:
+                cal_block = calib[sensor_name]
+                T = _extract_extrinsic_matrix(cal_block)
+                metadata["calibration"] = cal_block
+                if T is not None:
+                    metadata["extrinsics"] = {
+                        "T_sensor_in_parent": T,
+                        "parent_T_sensor": np.linalg.inv(T),
+                        "type": list(cal_block["extrinsics"].keys())[0],
+                    }
 
-    for lidar_dir in lidar_folders:
-        files = _get_lidar_files(lidar_dir)
-        sweeps = [_load_sweep(f, metadata_dict) for f in files]
+            frame_dict[sensor_name] = Sweep(pts, metadata)
 
-        output[lidar_dir.name] = sweeps
+        timeline[ts] = frame_dict
+        num_loaded += 1
 
-    return output
+    return timeline
