@@ -2,6 +2,7 @@ import numpy as np
 from lidar_types import ClusterGeometry, Scene, Cluster
 from scene_processing.config import Config
 from scene_processing.scanning import DbscanConfig, dbscan_3d
+from sklearn.cluster import KMeans
 
 
 def compute_yaw_obb(points: np.ndarray, eps: float = 1e-6):
@@ -111,48 +112,97 @@ def merge_close_clusters(scene: Scene) -> Scene:
     if not clusters:
         return scene
 
-    centers = np.array([c.geometry.centroid for c in clusters])
+    pts = scene.points
     N = len(clusters)
+
+    v_meds = np.zeros((N,))
+
+    assert scene.velocity_field is not None
+    for i, cl in enumerate(clusters):
+        v = scene.velocity_field[cl.member_indices]
+        speeds = np.linalg.norm(v[:, :2], axis=1)
+        v_meds[i] = np.median(speeds)
+
+    centers = np.array([c.geometry.centroid for c in clusters])
+
+    # adjacency matrix for merging
     adj = np.zeros((N, N), dtype=bool)
 
     for i in range(N):
         for j in range(i + 1, N):
-            d = np.linalg.norm(centers[i][:2] - centers[j][:2])  # XY distance
-            if d < Config.merge_gap_threshold:
-                adj[i, j] = adj[j, i] = True
+            d_xy = np.linalg.norm(centers[i][:2] - centers[j][:2])
+            if d_xy > Config.merge_gap_threshold:
+                continue
 
-    # connected components on this adjacency → merged clusters
+            dv = abs(v_meds[i] - v_meds[j])
+            if dv > Config.merge_speed_thr:
+                continue
+
+            # if all criteria pass → connect them
+            adj[i, j] = adj[j, i] = True
+
+    # --- connected components merging ---
     visited = np.zeros(N, dtype=bool)
-    merged: list[Cluster] = []
+    merged = []
 
     for i in range(N):
         if visited[i]:
             continue
-        # BFS/DFS to collect component
+
         stack = [i]
-        comp_idx = []
+        comp = []
         visited[i] = True
+
         while stack:
             k = stack.pop()
-            comp_idx.append(k)
+            comp.append(k)
             for j in np.where(adj[k])[0]:
                 if not visited[j]:
                     visited[j] = True
                     stack.append(j)
 
-        # merge member indices and recompute geometry
-        member_indices = np.concatenate([clusters[k].member_indices for k in comp_idx])
-        pts = scene.points[member_indices]
-        geom = _compute_cluster_geometry(pts)
-        merged.append(Cluster(member_indices=member_indices.tolist(), geometry=geom))
+        # merge comp
+        member_idx = np.concatenate([clusters[k].member_indices for k in comp])
+        pts_comp = pts[member_idx]
+        geom = _compute_cluster_geometry(pts_comp)
+        merged.append(Cluster(member_indices=member_idx.tolist(), geometry=geom))
 
-    return Scene(
-        points=scene.points,
-        ground_plane=scene.ground_plane,
-        scene_clusters=merged,
-        timestamp=scene.timestamp,
-        velocity_field=scene.velocity_field,
-    )
+    # replace scene clusters
+    scene.scene_clusters = merged
+    return scene
+
+
+def split_cluster_by_velocity(cluster: Cluster, scene: Scene):
+    """
+    If the cluster contains both static and moving points,
+    split it into subclusters using velocity magnitude.
+    """
+    assert scene.velocity_field is not None, "scene should have velocity field!"
+    idx = np.array(cluster.member_indices)
+    v = scene.velocity_field[idx][:, :2]
+    speeds = np.linalg.norm(v, axis=1)
+
+    static_mask = speeds < Config.static_speed_thr
+    moving_mask = speeds > Config.moving_speed_thr
+
+    # Case 1: pure cluster, don't split
+    if static_mask.all() or moving_mask.all():
+        return [cluster]
+
+    # Case 2: mixed: split into at least 2 groups
+
+    km = KMeans(n_clusters=2, n_init=5)
+    labels = km.fit_predict(speeds.reshape(-1, 1))
+
+    # Build new clusters
+    new_clusters = []
+    for lbl in [0, 1]:
+        sub_idx = idx[labels == lbl]
+        if sub_idx.size == 0:
+            continue
+        geom = _compute_cluster_geometry(scene.points[sub_idx])
+        new_clusters.append(Cluster(member_indices=sub_idx.tolist(), geometry=geom))
+    return new_clusters
 
 
 def compute_clusters_geom(
@@ -181,7 +231,7 @@ def compute_clusters_geom(
             continue  # DBSCAN "noise"
         idx = np.where(labels == c_id)[0]
         if idx.size < Config.min_samples:
-            continue  # *really* tiny garbage, OK to drop
+            continue  # tiny garbage, OK to drop
 
         geom = _compute_cluster_geometry(pts[idx])
         clusters.append(
@@ -190,6 +240,10 @@ def compute_clusters_geom(
                 geometry=geom,
             )
         )
+
+    split_clusters = []
+    for cl in clusters:
+        split_clusters.extend(split_cluster_by_velocity(cl, scene))
 
     clustered_scene = Scene(
         points=scene.points,

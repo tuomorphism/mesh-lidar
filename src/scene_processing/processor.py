@@ -107,31 +107,6 @@ def postprocess(scene: Scene) -> Scene:
         if n < Config.min_samples:  # tiny splats, OK to drop
             continue
 
-        sizes = c.geometry.sizes  # extents in local bbox
-        lx, ly, lz = sizes
-        max_extent = sizes.max()
-        min_extent = sizes.min()
-
-        # simple heuristics for type of cluster
-        is_very_large = max_extent > 25.0
-        is_very_tall = lz > 6.0
-        is_flat_wall_like = (lz > 2.5) and (max_extent / max(min_extent, 0.1) > 20.0)
-
-        # car / truck / ped sizes – totally hand-wavy, just to start
-        is_object_sized = (
-            0.3 <= lx <= 10.0
-            and 0.3 <= ly <= 10.0
-            and 0.5 <= lz <= 4.5
-            and not is_flat_wall_like
-        )
-
-        if is_object_sized:
-            c.label = 1  # likely dynamic object
-        elif is_flat_wall_like or is_very_large or is_very_tall:
-            c.label = 2  # likely static background structure
-        else:
-            c.label = 0  # unknown / misc
-
         filtered.append(c)
 
     return Scene(
@@ -150,11 +125,11 @@ def _cluster_scene_pair(i: int, A: Scene, B: Scene) -> Scene:
         if A.timestamp is not None and B.timestamp is not None
         else Config.delta_t_fallback
     )
-    vel, _ = nn_flow(A.points[:, :3], B.points[:, :3], dt=dt, max_dist=3)
+    vel, _ = nn_flow(A.points[:, :3], B.points[:, :3], dt=dt)
 
+    A.velocity_field = vel
     clustered = compute_clusters_geom(A)
     out = postprocess(clustered)
-    out.velocity_field = vel
     return out
 
 
