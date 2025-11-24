@@ -253,4 +253,11 @@ def compute_clusters_geom(
         velocity_field=scene.velocity_field,
     )
     merged_clusters = merge_close_clusters(clustered_scene)
+
+    # compute cluster level velocity
+    if scene.velocity_field is not None:
+        for cl in merged_clusters.scene_clusters or []:
+            velocity_xy = scene.velocity_field[cl.member_indices][:, :2].mean(axis=0)
+            cl.velocity_xy = velocity_xy
+
     return merged_clusters

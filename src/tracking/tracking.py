@@ -3,7 +3,7 @@ from typing import List, Tuple, Optional
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from lidar_types import Scene, Cluster
+from lidar_types import Scene, Cluster, TrackHistory, TrackSnapshot
 from tracking.config import TrackingConf
 from tracking.pose_calculations import (
     ctrv_jacobian_analytic,
@@ -15,6 +15,7 @@ from tracking.pose_calculations import (
     measurement_noise_R,
     extract_pose,
     shape_rel_dev,
+    vel_xy_from_state,
 )
 
 
@@ -36,6 +37,7 @@ class Observation:
     member_indices: np.ndarray
     T_w: np.ndarray  # (4,4) SE(3) pose in world coords (filtered)
     x_filt: np.ndarray  # (5,) EKF state at this time
+    P_filt: np.ndarray  # (5, 5) covariance of the observation (uncertainty)
     sizes: np.ndarray  # (3,)
     timestamp: float
 
@@ -75,6 +77,7 @@ class Track:
     hits: int = 0  # total successful associations
     is_confirmed: bool = False  # true once we trust the track
     observations: list[Observation] = field(default_factory=list)
+    last_det_index: Optional[int] = None
 
     @property
     def pose(self) -> np.ndarray:
@@ -95,11 +98,13 @@ class TrackingResult:
       point index -> entity ID (or -1 if unassigned). Optional.
     - tracks: the list of all tracks (tentative + confirmed); consumers can filter
       by is_confirmed if needed.
+    - histories: visualization / reconstruction friendly per-track time series.
     """
 
     det_to_track_per_scene: List[List[int]] = field(default_factory=list)
     point_to_entity_per_scene: Optional[List[np.ndarray]] = None
     tracks: List[Track] = field(default_factory=list)
+    histories: List[TrackHistory] = field(default_factory=list)
 
 
 class Tracker:
@@ -127,6 +132,10 @@ class Tracker:
         self.min_confirm_hits: int = getattr(self.conf, "min_confirm_hits", 2)
         self.tentative_prune: int = getattr(self.conf, "tentative_prune", 2)
         self.verbose: bool = getattr(self.conf, "verbose", False)
+
+        # NEW: weighting of velocity in association + swap suppression threshold
+        self.w_vel: float = getattr(self.conf, "w_vel", 0.0)
+        self.swap_cancel_cost: float = getattr(self.conf, "swap_cancel_cost", 3.0)
 
     def _make_state(self, T0: np.ndarray, shape_size: np.ndarray) -> TrackState:
         """
@@ -213,7 +222,8 @@ class Tracker:
         """
         Build cost matrix between predicted tracks and current detections.
 
-        Cost is sqrt(Mahalanobis^2) + w_shape * relative_size_deviation,
+        Cost is sqrt(Mahalanobis^2) + w_shape * relative_size_deviation
+        + w_vel * ||v_meas - v_pred||^2 (optional),
         with gating in Mahalanobis space, relative shape, and Euclidean XY gating.
         """
         nT = len(self.tracks)
@@ -266,8 +276,19 @@ class Tracker:
                 if d_shape > self.conf.shape_gate:
                     continue
 
-                # final cost
-                C[i, j] = np.sqrt(d2) + self.conf.w_shape * d_shape
+                # base cost: position + shape
+                cost = np.sqrt(d2) + self.conf.w_shape * d_shape
+
+                if self.w_vel > 0.0:
+                    v_meas = cl.velocity_xy
+                    if v_meas is not None:
+                        v_meas = np.asarray(v_meas[:2], dtype=float)
+                        v_pred = vel_xy_from_state(tr.state.x)
+                        dv = v_meas - v_pred
+                        d_vel2 = float(dv @ dv)
+                        cost += self.w_vel * d_vel2
+
+                C[i, j] = cost
 
         return C
 
@@ -326,6 +347,7 @@ class Tracker:
             tr.timestamp = scene_timestamp
             tr.missed = 0
             tr.hits += 1
+            tr.last_det_index = j
 
             # promote tentative → confirmed
             if not tr.is_confirmed and tr.hits >= self.min_confirm_hits:
@@ -342,6 +364,7 @@ class Tracker:
                     member_indices=member_idx,
                     T_w=T_filt.copy(),
                     x_filt=x_new.copy(),
+                    P_filt=P_new.copy(),
                     sizes=cl.geometry.sizes.copy(),
                     timestamp=scene_timestamp,
                 )
@@ -374,6 +397,7 @@ class Tracker:
                 missed=0,
                 hits=1,  # first hit (creation)
                 is_confirmed=False,  # start as tentative
+                last_det_index=j,
             )
 
             # initial observation uses the initial state
@@ -384,6 +408,7 @@ class Tracker:
                     member_indices=member_idx,
                     T_w=T0.copy(),
                     x_filt=st.x.copy(),
+                    P_filt=st.P.copy(),
                     sizes=cl.geometry.sizes.copy(),
                     timestamp=t0,
                 )
@@ -436,23 +461,72 @@ class Tracker:
             mapping[np.asarray(member_idx, dtype=int)] = int(entity_id)
         return mapping
 
+    def _suppress_pure_swaps(
+        self,
+        pairs: List[Tuple[int, int]],
+        C: np.ndarray,
+    ) -> List[Tuple[int, int]]:
+        """
+        Detect 'pure swaps' where two tracks exchange detections compared to the
+        previous frame, and cancel those assignments if they are high-cost
+        (ambiguous).
+
+        This keeps both tracks unmatched for that frame, so they just coast
+        on prediction instead of swapping IDs.
+        """
+        if len(pairs) < 2:
+            return pairs
+
+        keep = set(pairs)
+        # map track_index -> det_index for current frame
+        cur = {ti: dj for ti, dj in pairs}
+        nT = len(self.tracks)
+        thr = self.swap_cancel_cost
+
+        for i in range(nT):
+            li = self.tracks[i].last_det_index
+            ji = cur.get(i, None)
+            if li is None or ji is None:
+                continue
+
+            for k in range(i + 1, nT):
+                lk = self.tracks[k].last_det_index
+                jk = cur.get(k, None)
+                if lk is None or jk is None:
+                    continue
+
+                if ji == lk and jk == li:
+                    # symmetric swap detected
+                    cij = C[i, ji]
+                    ckj = C[k, jk]
+                    if cij > thr and ckj > thr:
+                        keep.discard((i, ji))
+                        keep.discard((k, jk))
+
+        return list(keep)
+
     def fit(self, scenes: List[Scene]) -> TrackingResult:
         """
-        Apply tracking to a list of scenes.
+        Apply tracking to a list of scenes and return a rich TrackingResult
+        with per-scene mappings + per-track histories.
         """
         result = TrackingResult(
             det_to_track_per_scene=[],
             point_to_entity_per_scene=[] if self.conf.build_point_map else None,
             tracks=[],
+            histories=[],
         )
 
         if not scenes:
             return result
 
-        first = scenes[0]
-        t_first = float(first.timestamp or 0.0)
+        # reset tracker state
         self.tracks = []
         self.next_entity_id = 0
+
+        # ---------- Initialize from first scene ----------
+        first = scenes[0]
+        t_first = float(first.timestamp or 0.0)
 
         for det_idx, cl in enumerate(first.scene_clusters or []):
             T0 = extract_pose(cl)
@@ -464,10 +538,13 @@ class Tracker:
                 timestamp=t_first,
                 missed=0,
                 hits=1,
-                is_confirmed=True,  # first-frame objects are trusted
+                is_confirmed=True,
+                last_det_index=det_idx,
             )
 
             member_idx = np.array(getattr(cl, "member_indices", []), dtype=int)
+
+            # initial observation
             tr.observations.append(
                 Observation(
                     scene_idx=0,
@@ -475,6 +552,7 @@ class Tracker:
                     member_indices=member_idx,
                     T_w=T0.copy(),
                     x_filt=st.x.copy(),
+                    P_filt=st.P.copy(),
                     sizes=cl.geometry.sizes.copy(),
                     timestamp=t_first,
                 )
@@ -483,27 +561,30 @@ class Tracker:
             self.tracks.append(tr)
             self.next_entity_id += 1
 
-        # det -> track map for scene 0 (direct births in order)
+        # detection -> track mapping for scene 0
         det_to_track_0 = [-1] * len(first.scene_clusters or [])
-        for i, cl in enumerate(first.scene_clusters or []):
+        for i, _cl in enumerate(first.scene_clusters or []):
             if i < len(self.tracks):
                 det_to_track_0[i] = self.tracks[i].entity_id
 
         result.det_to_track_per_scene.append(det_to_track_0)
+
         if self.conf.build_point_map and result.point_to_entity_per_scene is not None:
             result.point_to_entity_per_scene.append(
                 self._build_point_to_entity_mapping(first, det_to_track_0)
             )
 
+        # If only one frame, just export histories afterwards
         if len(scenes) == 1:
+            # build histories from observations & finalize result
             result.tracks = list(self.tracks)
+            result.histories = self._build_histories()
             return result
 
         current_scene = scenes[0]
 
         for k, next_scene in enumerate(scenes[1:], start=1):
             if next_scene.scene_clusters is None:
-                # still advance result slots so lengths match 'scenes'
                 result.det_to_track_per_scene.append([])
                 if (
                     self.conf.build_point_map
@@ -513,16 +594,17 @@ class Tracker:
                 current_scene = next_scene
                 continue
 
+            # time step
             assert current_scene.timestamp is not None
             assert next_scene.timestamp is not None
             dt = float(next_scene.timestamp - current_scene.timestamp)
             if not np.isfinite(dt) or dt <= 0:
                 dt = self.conf.dt_default
 
-            # 1) predict all tracks to next timestamp
+            # 1) Predict all tracks to next timestamp
             self.get_predictions(dt)
 
-            # 2) build cost matrix & solve assignment
+            # 2) Build cost matrix & solve assignment
             detections = next_scene.scene_clusters or []
             C = self._build_cost_matrix(detections)
             rows, cols = self.solve_assignment(C)
@@ -531,6 +613,8 @@ class Tracker:
             pairs = [
                 (i, j) for i, j in zip(rows.tolist(), cols.tolist()) if C[i, j] < self.M
             ]
+
+            pairs = self._suppress_pure_swaps(pairs, C)
 
             if self.verbose:
                 print(
@@ -547,12 +631,12 @@ class Tracker:
                 j for j in range(len(detections)) if j not in matched_dets
             ]
 
-            # per-scene detection->entity mapping
+            # per-scene detection->entity mapping (preliminary)
             det_to_track = [-1] * len(detections)
             for i, j in pairs:
                 det_to_track[j] = self.tracks[i].entity_id
 
-            # 3) lifecycle updates
+            # 3) Lifecycle updates: update / miss / spawn / prune
             self._update_matched(
                 pairs,
                 detections,
@@ -586,6 +670,7 @@ class Tracker:
                             break
 
             result.det_to_track_per_scene.append(det_to_track)
+
             if (
                 self.conf.build_point_map
                 and result.point_to_entity_per_scene is not None
@@ -597,4 +682,46 @@ class Tracker:
             current_scene = next_scene
 
         result.tracks = list(self.tracks)
+        result.histories = self._build_histories()
         return result
+
+    def _build_histories(self) -> List[TrackHistory]:
+        """
+        Convert internal Track objects + Observations into TrackHistory objects.
+        """
+        histories: List[TrackHistory] = []
+        static_speed_thresh = getattr(self.conf, "static_speed_thresh", 0.3)
+
+        for tr in self.tracks:
+            snapshots: List[TrackSnapshot] = []
+            speeds: List[float] = []
+
+            for ob in tr.observations:
+                snapshots.append(
+                    TrackSnapshot(
+                        timestamp=ob.timestamp,
+                        scene_idx=ob.scene_idx,
+                        entity_id=tr.entity_id,
+                        T_w=ob.T_w.copy(),
+                        x_filt=ob.x_filt.copy(),
+                        sizes=ob.sizes.copy(),
+                        P=tr.state.P,
+                        member_indices=ob.member_indices.copy(),
+                    )
+                )
+                if ob.x_filt.shape[0] >= 4:
+                    speeds.append(float(ob.x_filt[3]))
+
+            mean_speed = float(np.mean(speeds)) if speeds else 0.0
+
+            histories.append(
+                TrackHistory(
+                    entity_id=tr.entity_id,
+                    is_confirmed=tr.is_confirmed,
+                    snapshots=snapshots,
+                    mean_speed=mean_speed,
+                    is_static=(mean_speed < static_speed_thresh),
+                )
+            )
+
+        return histories

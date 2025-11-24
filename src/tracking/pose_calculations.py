@@ -182,6 +182,16 @@ def ctrv_jacobian_analytic(x: np.ndarray, dt: float) -> np.ndarray:
     return F
 
 
+def vel_xy_from_state(x: np.ndarray) -> np.ndarray:
+    """
+    Convert CTRV state x = [px, py, yaw, v, omega] to XY velocity vector.
+    """
+    yaw = float(x[2])
+    v = float(x[3])
+    c, s = np.cos(yaw), np.sin(yaw)
+    return np.array([v * c, v * s], dtype=float)
+
+
 def measurement_noise_R(position_noise: float, direction_noise: float) -> np.ndarray:
     """
     Measurement noise covariance for z = [px, py, yaw].

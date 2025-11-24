@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import numpy as np
 
 
@@ -53,6 +53,7 @@ class Cluster:
     member_indices: list[int]
     geometry: ClusterGeometry
     label: int = field(default=0)
+    velocity_xy: np.ndarray | None = None
 
     def points(self, raw_data: np.ndarray) -> np.ndarray:
         """
@@ -101,3 +102,37 @@ class Scene:
         return np.asarray(
             [_map_cluster(mapping.get(idx)) for idx in range(self.points.shape[0])]
         )
+
+
+@dataclass
+class TrackSnapshot:
+    """
+    Per-frame snapshot of a tracked object.
+
+    P is the EKF covariance at this time, used for uncertainty visualization.
+    """
+
+    timestamp: float
+    scene_idx: int
+    entity_id: int
+
+    T_w: np.ndarray  # (4,4) SE(3) pose
+    x_filt: np.ndarray  # (5,) [px, py, yaw, v, omega]
+    P: np.ndarray  # (5,5) covariance at this frame
+
+    sizes: np.ndarray  # (3,)
+    member_indices: np.ndarray  # indices into the scene point cloud
+
+
+@dataclass
+class TrackHistory:
+    """
+    Full time-series for a single tracked entity.
+    """
+
+    entity_id: int
+    is_confirmed: bool
+    snapshots: List[TrackSnapshot]
+
+    mean_speed: float
+    is_static: bool

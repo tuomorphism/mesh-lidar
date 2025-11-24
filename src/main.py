@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from visualization.visualization import ClusterBBoxViewer, view_cluster_bboxes
+from visualization.scene_track_visualization import SceneAndTrackViewer
 from scene_processing.loader import load_sequence_timesynced
 from scene_processing.processor import process_sweeps
 from tracking.tracking import Tracker, TrackingConf
@@ -11,7 +11,7 @@ def main(
     dataset_designation: Path = Path("UrbanIng-V2X/dataset/20241126_0017_crossing1_00"),
 ):
     root = Path("./datasets") / dataset_designation
-    N = 8
+    N = 20
     sweep_data = load_sequence_timesynced(root, max_frames=N)
     timestamps = list(sweep_data.keys())
 
@@ -37,8 +37,8 @@ def main(
     tracker = Tracker(tracker_conf)
     result = tracker.fit(processed)
 
-    viewer = ClusterBBoxViewer(processed, result.point_to_entity_per_scene or [])
-    view_cluster_bboxes(viewer)
+    viewer = SceneAndTrackViewer(processed, tracking_result=result, min_diag=0.1)
+    viewer.run()
 
 
 if __name__ == "__main__":
