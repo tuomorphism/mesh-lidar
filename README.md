@@ -1,190 +1,206 @@
-# Evolving 3D Mesh & Object Tracking (Static → Dynamic LiDAR)
+# Hybrid LiDAR Reconstruction — Static Mesh + Dynamic Object Tracking
 
-This project reconstructs evolving 3D geometry from a *stationary LiDAR sensor* observing a dynamic scene.  
-It detects and tracks moving objects, estimates their rigid motion, and fuses both static and dynamic data into watertight 3D meshes using **TSDF reconstruction**.
+This repository implements a full LiDAR processing pipeline for a **stationary roadside LiDAR sensor**, capable of:
 
----
+- Fusing multiple temporal sweeps into one dense frame  
+- Extracting robust geometric clusters  
+- Refining clusters using velocity to split/merge dynamic and static structures  
+- Tracking objects using an EKF model  
+- Separating persistent static geometry from moving objects  
+- Preparing the foundation for a **hybrid TSDF-based static mesh + dynamic object reconstruction**
 
-## 🧭 Overview
-
-- **Input:** Time-indexed LiDAR sweeps of a fixed scene (street corner, intersection, etc.)  
-- **Output:**  
-  - A static background mesh reconstructed via global TSDF  
-  - Per-object TSDF volumes, motion-compensated using tracked $SE(3)$ transforms  
-  - A composite 3D scene that evolves realistically over time
+The medium-term goal is to produce a clean static mesh of the environment (walls, poles, buildings, infrastructure) and layer dynamic objects on top using either point-cloud fusion or per-object TSDF.
 
 ---
 
-## 📂 Sprint 1 – Foundations
+# Overview
 
-### [P0] T1: Data Loading & Preprocessing
-- Implement dataset loader (SemanticKITTI / AI4CE Roadside / nuScenes mini)  
-- Ground-plane removal (RANSAC)  
-- Voxel downsampling (0.05–0.1 m)
+This system processes raw LiDAR sweeps into a structured dynamic scene:
 
-### [P0] T2: Clustering & Object Detection
-- DBSCAN clustering on non-ground points  
-- Filter tiny clusters  
-- Compute centroid, bounding box, and extent
+```
+Raw Sweeps → Multi-Sweep Fusion → Clustering  
+           → Velocity Refinement → EKF Tracking  
+           → Static vs Dynamic → TSDF Reconstruction
+```
 
----
-
-## 📂 Sprint 2 – Motion & Tracking
-
-### [P0] T3: Scene Flow Estimation
-- kNN graph per frame pair  
-- Per-point nearest-neighbor matching  
-- Variational refinement:
-
-$$
-E(v) = \sum_i \|x_i' - (x_i + v_i)\|^2 + \lambda \sum_{(i,j)\in\mathcal{N}} \|v_i - v_j\|^2
-$$
-
-- Visualize as color-coded velocity fields
-
-### [P0] T4: Rigid Motion Estimation (SE(3))
-- Fit per-cluster rigid motion via ICP  
-- Represent transformations using the exponential map $T = \exp(\hat{\xi}) \in SE(3)$  
-- Estimate velocity and yaw rate  
-- Store residuals as motion confidence
-
-### [P0] T5: Multi-Object Tracking
-- State vector $[x, y, dx, dy, \psi, d\psi]$  
-- EKF or UKF on $SE(3)$  
-- Data association: Mahalanobis gating + Hungarian  
-- Track lifecycle: spawn / maintain / terminate
+The pipeline is built to support roadside perception, HD mapping, and dynamic environment modeling with high spatial and temporal resolution.
 
 ---
 
-## 📂 Sprint 3 – Mesh Reconstruction
+# Current System Features (Implemented)
 
-### [P0] T6: Static Background TSDF
-Integrate all *non-moving* points into a **global TSDF volume**.  
+## 1. Multi-Sweep Fusion
 
-Energy formulation:
+The system fuses a short temporal window of LiDAR sweeps into a single “super-sweep”:
 
-$$
-E(\Phi) = \sum_k w_k \big(s_k - \Phi(x_k)\big)^2 + \lambda \int \|\nabla \Phi\|^2 \, dx
-$$
+- Several sweeps transformed into world coordinates  
+- Combined for increased density  
+- Ground removal and voxel downsampling applied afterward  
+- Improves cluster stability and tracking performance significantly
 
-Solve as sparse linear system:
-
-$$
-(S^\top W S + \lambda L)\Phi = S^\top W s
-$$
-
-Extract surface via Marching Cubes ($\Phi = 0$) → watertight background mesh.
+**Benefits:**
+- Cleaner cluster boundaries  
+- Better separation between cars and infrastructure  
+- Higher point coverage for TSDF later  
 
 ---
 
-### [P0] T7: Dynamic Object TSDFs (Rigid-Compensated Fusion)
+## 2. Two-Phase Clustering (Geometry → Velocity Refinement)
 
-Each tracked object $i$ has:
-- A local frame $\mathcal{F}_i$ with pose $T_i(t)\in SE(3)$  
-- A local TSDF $\Phi_i(x)$ defined in that frame
+### A. Geometry-First DBSCAN
 
-For every frame:
+Initial clusters are purely geometric:
 
-$$
-\Phi_i^{(t+1)}(x)
-= \text{Fuse}\big(\Phi_i^{(t)}(x),
-\, s_{k,t+1} - \Phi_i(T_i^{-1}(t+1) x_{k,t+1})\big)
-$$
+- DBSCAN using Euclidean distance  
+- Captures large infrastructure and vehicle shapes  
+- Removes tiny clusters and noise  
+- Serves as a stable initial segmentation step
 
-This **motion-compensated fusion** yields sharp, consistent meshes of moving objects.
+### B. Velocity-Based Split & Merge
 
----
+After computing point-wise local motion via nearest-neighbor scene flow:
 
-### [P1] T8: Joint Optimization (Shape + Pose)
+- **Split** clusters when subregions have significantly different velocities  
+- **Merge** clusters when shapes and velocities agree  
+- Prevents common failure cases such as:
+  - Cars merging with walls or poles  
+  - Vehicles split into multiple fragments  
+  - Stationary infrastructure fused with moving objects  
 
-Refine both geometry and motion jointly:
-
-$$
-E(\Phi_i, T_i) =
-\sum_{t,k} \rho\!\Big(s_{k,t} - \Phi_i(T_i^{-1}(t) x_{k,t})\Big)
-+ \lambda \int \|\nabla \Phi_i\|^2 \, dx
-$$
-
-Alternate:
-1. **Pose update:** minimize over $T_i$ (ICP on implicit surface)  
-2. **Shape update:** minimize over $\Phi_i$ (variational TSDF solve)
+The result is a clean, stable clustering suitable for tracking.
 
 ---
 
-## 📂 Sprint 4 – Visualization & Composition
+## 3. EKF Tracking (CTRV Model)
 
-### [P0] V1: Evolving Scene Renderer
-- Extract meshes for background + each object  
-- Apply current $T_i(t)$ to object meshes  
-- Composite and render in Open3D (or Blender) for time-lapse visualization
+Each cluster feeds into a multi-object tracker using an Extended Kalman Filter with the CTRV (constant-turn-rate-and-velocity) motion model.
 
-### [P1] V2: Per-Vertex Velocity Coloring
-- Store velocity from scene flow or tracking  
-- Color vertices by magnitude or direction
+State vector:
 
-### [P1] V3: Confidence Visualization
-- Map ICP residuals or fusion weights to vertex color for debugging
+```
+[px, py, yaw, v, omega]
+```
 
----
+Implemented:
 
-## 📂 Sprint 5 – Evaluation & Metrics
+- Analytic CTRV prediction model  
+- EKF covariance propagation  
+- Mahalanobis gating  
+- Hungarian global data association  
+- Track lifecycle management (spawn / confirm / kill)  
+- Shape consistency validation  
+- Velocity smoothing  
 
-### [P0] E1: Tracking Metrics
-- IDF1, MOTA, ID switches
-
-### [P0] E2: Velocity Metrics
-- RMSE vs ground truth (if available)  
-- Temporal consistency (Δ displacement)
-
-### [P0] E3: Mesh Metrics
-- Chamfer distance, completeness, voxel overlap, vertex churn
+This produces stable track identities over long sequences and dense traffic.
 
 ---
 
-## 📂 Sprint 6 – Mathematical Enhancements
+## 4. Static vs Dynamic Segmentation
 
-### [P1] M1: SE(3) Lie-Group Filtering
-- Implement EKF with exponential-map updates  
-- Compare to Euclidean filtering
+Using EKF velocities and temporal consistency:
 
-### [P1] M2: Helmholtz Scene-Flow Decomposition
-Decompose flow:
+- Objects with near-zero velocity become **static**
+- Others with persistent motion become **dynamic**
+- Static points are accumulated for global TSDF  
+- Dynamic points are grouped per object for later reconstruction  
 
-$$
-v(x) = \nabla \phi(x) + \nabla \times A(x)
-$$
-
-Visualize divergence (compression) and curl (rotation).
-
-### [P2] M3: Topology-Aware Mesh Regularization
-- Persistent homology checks on TSDF slices  
-- Flag spurious tunnels or holes
-
-### [P2] M4: Uncertainty Propagation
-- Use ICP residuals to estimate covariance of $T_i$  
-- Confidence-weighted TSDF fusion
+This yields a clean separation between static infrastructure and moving objects.
 
 ---
 
-## 📂 Stretch Goals
-- Multi-sensor fusion (2+ LiDARs)  
-- Octree TSDF (adaptive resolution)  
-- Radar or optical flow integration for direct velocity priors  
-- Differentiable TSDF fusion for gradient-based optimization
+# Next Steps — TSDF Reconstruction Roadmap
+
+The upcoming development focuses entirely on **hybrid mesh reconstruction**.
 
 ---
 
-## ✅ Deliverables
-- Stable multi-object tracking with $SE(3)$ trajectories  
-- Static background mesh and motion-compensated dynamic object meshes  
-- Quantitative metrics and demo video of full evolving 3D scene  
-- Clear mathematical foundations linking rigid motion and implicit surface optimization
+## Step 1 — Static TSDF Construction
+
+**Goal:** Generate the first full static mesh using only static points.
+
+### Plan
+
+1. Initialize a world-aligned voxel grid (5–8 cm resolution).  
+2. For each fused sweep:
+   - Extract static points  
+   - Compute signed distance values  
+   - Integrate into TSDF  
+3. Apply Marching Cubes for mesh extraction.  
+4. Visualize and refine the static mesh.  
+
+**Expected Output:**  
+A clean, watertight mesh of walls, buildings, poles, and ground structures.
 
 ---
 
-## 🧠 References
-- Curless & Levoy, *Volumetric Method for Building Complex Models from Range Images*, 1996  
-- Newcombe et al., *KinectFusion*, 2011  
-- Whelan et al., *ElasticFusion*, 2015  
-- Zhou et al., *DynamicFusion*, 2015  
-- Chern & Wang, *Computing Minimal Surfaces with Differential Forms*, 2022
+## Step 2 — Dynamic Object Reconstruction
+
+Dynamic objects can be reconstructed in two ways:
+
+### Option A — Simple Point-Cloud Fusion
+
+- Transform object clusters into track-local coordinates.  
+- Accumulate across frames.  
+- Render as consistent fused point clouds.
+
+### Option B — Per-Object TSDF Volumes
+
+- Create a small TSDF volume per tracked object.  
+- Transform incoming object points using EKF poses.  
+- Fuse into object-local TSDF.  
+- Extract clean per-object meshes.
+
+_Start with Option A for rapid iteration._
+
+---
+
+## Step 3 — Hybrid Scene Composition
+
+- Render static TSDF mesh.  
+- Insert dynamic object reconstructions using their tracked poses.  
+- Produce a full time-lapse of the evolving scene.
+
+---
+
+# About the Collaboration (Human + ChatGPT 5/5.1)
+
+This project is developed as a **collaboration between the human author and ChatGPT models (GPT-5 and GPT-5.1)**.
+
+### How the Collaboration Works
+
+- **Design:** I define goals, architecture, and constraints. ChatGPT proposes alternative algorithms, and improvements.  
+- **Code:** I write and test code, ChatGPT is used to rewrite modules, clarify logic, and some numerical optimization.  
+- **Math:** ChatGPT assists with more complex derivations (e.g., CTRV Jacobians) and data transforms.  
+- **Iteration:**  
+  - I test, evaluate output and adjust direction.  
+  - ChatGPT refines ideas, rewrites documentation, and provides alternatives.  
+  - System evolves through cyclic co-design.
+
+This collaborative style of working is used to drastically increase velocity.
+
+---
+
+# Repository Structure
+
+```
+/scene_processing/
+  Files for clustering and combining multiple sweeps
+
+/tracking/
+  Files for EKF based tracking
+
+/tsdf/
+  TODO: Files for creating TSDF style mesh
+
+/datasets/
+    UrbanIng-V2X/
+      Files from the UrbanIng-V2X dataset
+```
+
+---
+
+# References
+
+- Curless & Levoy - *A Volumetric Method for Building Complex Models from Range Images* 
+- Sekaran et al. - *UrbanIng-V2X: A Large-Scale Multi-Vehicle, Multi-Infrastructure Dataset Across Multiple Intersections for Cooperative Perception*
+- CTRV / EKF motion models  
