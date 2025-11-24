@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Sequence, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 import numpy as np
 import open3d as o3d
 import matplotlib as mpl
@@ -89,7 +89,7 @@ class ClusterBBoxViewer:
 
         self.entity_ids = entity_ids
 
-        self.mode = 0  # Track visualization, 1 if velocity field
+        self.mode = 0  # Track visualization, 1 if velocity field, 2 if intensity
 
     def _colors_from_labels(self, labels: Optional[np.ndarray], N: int) -> np.ndarray:
         if labels is None or len(labels) != N:
@@ -206,6 +206,12 @@ class ClusterBBoxViewer:
             )
         elif self.mode == 1 and velocities is not None:
             cols = self._color_from_float(velocities)
+        elif self.mode == 2 and s.points.shape[1] >= 4:
+            intensity = s.points[:, 3]
+            i = intensity - intensity.min()
+            if i.max() > 0:
+                i /= i.max()
+            cols = np.stack([i, 1 - i, 0.5 * np.ones_like(i)], axis=1)
         else:
             cols = np.full((pts.shape[0], 3), 0.6, float)
         self.pcd.colors = o3d.utility.Vector3dVector(cols)

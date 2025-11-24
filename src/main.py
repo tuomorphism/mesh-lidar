@@ -1,74 +1,18 @@
 from pathlib import Path
-import open3d as o3d
-import numpy as np
-
 
 from visualization.visualization import ClusterBBoxViewer, view_cluster_bboxes
 from scene_processing.loader import load_sequence_timesynced
 from scene_processing.processor import process_sweeps
 from tracking.tracking import Tracker, TrackingConf
-from lidar_types import Sweep
 from fusion import fuse_sweeps_in_world
 
 
-def visualize_sweep(
-    sweep: Sweep,
-    color_mode: str = "height",
+def main(
+    dataset_designation: Path = Path("UrbanIng-V2X/dataset/20241126_0017_crossing1_00"),
 ):
-    """
-    Visualize a single LiDAR or radar sweep using Open3D.
-
-    Args:
-        sweep         : Sweep object containing pts and metadata
-        voxel_size    : Downsample size (meters)
-        color_mode    : 'height' or 'intensity'
-    """
-
-    pts = sweep.pts
-
-    if pts.shape[1] < 3:
-        raise ValueError("Sweep must contain at least XYZ columns.")
-
-    xyz = pts[:, :3]
-
-    # Create Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(xyz)
-
-    # ----- Color handling -----
-    if color_mode == "height":
-        z = xyz[:, 2]
-        z_min, z_max = np.min(z), np.max(z)
-        z_norm = (z - z_min) / max(z_max - z_min, 1e-6)
-        colors = np.stack([z_norm, 1 - z_norm, 0.5 * np.ones_like(z_norm)], axis=1)
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-
-    elif color_mode == "intensity" and pts.shape[1] >= 4:
-        intensity = pts[:, 3]
-        i = intensity - intensity.min()
-        if i.max() > 0:
-            i /= i.max()
-        colors = np.stack([i, i, i], axis=1)
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-
-    else:
-        # Default color: light blue
-        pcd.paint_uniform_color([0.2, 0.5, 1.0])
-
-    # ----- Visualize -----
-    o3d.visualization.draw_geometries(
-        [pcd],
-        window_name=f"Sweep visualization: {sweep.metadata.get('sensor', '')}",
-        point_show_normal=False,
-        width=1280,
-        height=720,
-    )
-
-
-def main():
-    root = Path("./datasets/UrbanIng-V2X/dataset/20241126_0017_crossing1_00")
-    N = 200
-    sweep_data = load_sequence_timesynced(root)
+    root = Path("./datasets") / dataset_designation
+    N = 8
+    sweep_data = load_sequence_timesynced(root, max_frames=N)
     timestamps = list(sweep_data.keys())
 
     print(f"Number of frames {len(timestamps)}.")
@@ -91,7 +35,7 @@ def main():
 
     tracker_conf = TrackingConf()
     tracker = Tracker(tracker_conf)
-    result = tracker.apply(processed)
+    result = tracker.fit(processed)
 
     viewer = ClusterBBoxViewer(processed, result.point_to_entity_per_scene or [])
     view_cluster_bboxes(viewer)
