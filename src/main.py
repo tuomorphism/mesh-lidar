@@ -11,7 +11,7 @@ def main(
     dataset_designation: Path = Path("UrbanIng-V2X/dataset/20241126_0017_crossing1_00"),
 ):
     root = Path("./datasets") / dataset_designation
-    N = 20
+    N = 10
     sweep_data = load_sequence_timesynced(root, max_frames=N)
     timestamps = list(sweep_data.keys())
 

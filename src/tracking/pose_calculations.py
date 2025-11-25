@@ -205,6 +205,22 @@ def measurement_noise_R(position_noise: float, direction_noise: float) -> np.nda
     )
 
 
+def compute_measurement_noise_scaling(cluster: Cluster) -> float:
+    """Return multiplicative scaling for measurement noise."""
+    N = max(len(cluster.member_indices), 1)
+
+    N_ref = 30.0  # cluster with 30 points gets scale ~1
+    scale_pts = np.sqrt(N_ref / min(N, N_ref))
+
+    sx, sy, _ = cluster.geometry.sizes
+    size_min = max(sx, sy)
+    size_ref = 1.0  # ~1m (pedestrian-size); anything smaller gets scaled up
+
+    scale_size = np.clip(size_ref / max(size_min, 0.2), 1.0, 3.0)
+
+    return max(scale_pts, scale_size)
+
+
 def extract_pose(cluster: Cluster) -> np.ndarray:
     """
     Extract 4x4 SE3 pose from a cluster's geometry.

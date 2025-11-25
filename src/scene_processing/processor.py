@@ -93,10 +93,7 @@ def preprocess(
 def postprocess(scene: Scene) -> Scene:
     """
     - Drop only very small clusters (noise).
-    - Assign cluster.label to hint at type:
-        0 = unknown / generic
-        1 = likely moving object (car/ped/etc.)
-        2 = likely static background (wall, façade, pole)
+    - Check the Z extent of cluster
     """
     if scene.scene_clusters is None:
         return scene
@@ -105,6 +102,9 @@ def postprocess(scene: Scene) -> Scene:
     for c in scene.scene_clusters:
         n = len(c.member_indices)
         if n < Config.min_samples:  # tiny splats, OK to drop
+            continue
+
+        if c.geometry.sizes[2] < Config.min_height_cutoff:
             continue
 
         filtered.append(c)
