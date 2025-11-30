@@ -13,6 +13,8 @@ The pipeline produces a clean static reconstruction of the environment and overl
 
 ---
 
+<video src="./assets/hero.mp4" autoplay controls></video>
+
 ## 🚀 Implemented Features
 
 ### **1. Multi-Sweep Fusion**

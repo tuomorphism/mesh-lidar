@@ -1,0 +1,5 @@
+title: LIDAR Mesh
+description: "A complete roadside LiDAR perception system built from the ground up, featuring fused 3D point clouds, intelligent clustering, and stable EKF tracking. The pipeline cleanly separates static structures from moving objects, enabling accurate scene reconstruction in complex urban environments."
+tier: 1
+image: ''
+date: 2025-11-30
