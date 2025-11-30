@@ -1,5 +1,6 @@
 import numpy as np
 import open3d as o3d
+from tqdm import tqdm
 
 from lidar_types import Scene, Cluster, Sweep
 from scene_processing.clustering import compute_clusters_geom
@@ -56,7 +57,7 @@ def preprocess(
     Downsample [x,y,z,i,...], remove ground with RANSAC, return Scene with DS non-ground.
     """
     assert points.ndim == 2 and points.shape[1] >= 3
-    print(f"Preprocessing index {i}.")
+    # tqdm progress bar should be handled at the call site (process_sweeps), so we remove prints here
 
     ds_points = voxel_downsample_with_intensity(points)
     if ds_points.shape[0] == 0:
@@ -119,7 +120,7 @@ def postprocess(scene: Scene) -> Scene:
 
 
 def _cluster_scene_pair(i: int, A: Scene, B: Scene) -> Scene:
-    print(f"Processing pair {i}, {i + 1}")
+    # tqdm progress bar should be handled at the call site (process_sweeps), so we remove prints here
     dt = (
         B.timestamp - A.timestamp
         if A.timestamp is not None and B.timestamp is not None
@@ -134,5 +135,14 @@ def _cluster_scene_pair(i: int, A: Scene, B: Scene) -> Scene:
 
 
 def process_sweeps(sweeps: list[Sweep]) -> list[Scene]:
-    pre = [preprocess(i, s.pts, metadata=s.metadata) for i, s in enumerate(sweeps)]
-    return [_cluster_scene_pair(i, pre[i], pre[i + 1]) for i in range(len(pre) - 1)]
+
+    # Use tqdm for preprocessing progress
+    pre = [
+        preprocess(i, s.pts, metadata=s.metadata)
+        for i, s in tqdm(enumerate(sweeps), total=len(sweeps), desc="Preprocessing")
+    ]
+    # Use tqdm for clustering scene pairs progress
+    return [
+        _cluster_scene_pair(i, pre[i], pre[i + 1])
+        for i in tqdm(range(len(pre) - 1), desc="Clustering Pairs")
+    ]

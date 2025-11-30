@@ -9,7 +9,7 @@ class Config:
     """
 
     voxel_size = 0.06
-    eps_factor = 9.0
+    eps_factor = 12.0
     min_samples = 5
     delta_t_fallback = 1.0
     merge_gap_threshold = 1.0

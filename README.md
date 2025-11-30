@@ -169,8 +169,8 @@ This project is developed as a **collaboration between the human author and Chat
 ### How the Collaboration Works
 
 - **Design:** I define goals, architecture, and constraints. ChatGPT proposes alternative algorithms, and improvements.  
-- **Code:** I write and test code, ChatGPT is used to rewrite modules, clarify logic, and some numerical optimization.  
-- **Math:** ChatGPT assists with more complex derivations (e.g., CTRV Jacobians) and data transforms.  
+- **Code:** I write and test code, ChatGPT is used to refactor code, clarify logic, and some numerical optimization.  
+- **Math:** ChatGPT assists with more tedius algebraic derivations (e.g., CTRV Jacobians) and some data transforms.  
 - **Iteration:**  
   - I test, evaluate output and adjust direction.  
   - ChatGPT refines ideas, rewrites documentation, and provides alternatives.  
@@ -178,26 +178,11 @@ This project is developed as a **collaboration between the human author and Chat
 
 This collaborative style of working is used to drastically increase velocity.
 
----
 
-# Repository Structure
+# Future work 
 
-```
-/scene_processing/
-  Files for clustering and combining multiple sweeps
-
-/tracking/
-  Files for EKF based tracking
-
-/tsdf/
-  TODO: Files for creating TSDF style mesh
-
-/datasets/
-    UrbanIng-V2X/
-      Files from the UrbanIng-V2X dataset
-```
-
----
+- Testing of modules
+- Automated optimization of parameters
 
 # References
 
