@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List
 import numpy as np
 
 from lidar_types import TrackHistory, TrackSnapshot
-from lidar_types import Scene  # if your scene type is here
+from lidar_types import Scene
 
 
 @dataclass
@@ -12,23 +12,27 @@ class StaticDynamicConf:
     Configuration for classifying tracks as static or dynamic.
     """
 
-    window_sec: float = 2.0  # sliding window duration
+    # short window for "instantaneous" behaviour
+    window_sec: float = 2.0
+
+    # long window for accumulated travel distance
+    long_window_sec: float = 6.0
 
     # EKF velocity thresholds
-    static_v_max: float = 0.6
-    dynamic_v_min: float = 1.0
+    static_v_max: float = 1.0
+    dynamic_v_min: float = 1.4
 
-    # Bounding-box center drift thresholds (m/s)
-    static_center_drift_max: float = 1.0
-    dynamic_center_drift_min: float = 1.6
-
-    # Bounding-box size deviation thresholds (relative)
-    static_rel_size_dev_max: float = 0.80  # 0.70
-    dynamic_rel_size_dev_min: float = 0.95
+    # Bounding-box center drift thresholds (m/s) over a short window
+    static_center_drift_max: float = 1.4
+    dynamic_center_drift_min: float = 2.0
 
     # Overlap thresholds
-    static_overlap_min: float = 0.40  # >= 40% overlap → very static
-    dynamic_overlap_max: float = 0.10  # <= 10% overlap → very dynamic
+    static_overlap_min: float = 0.20  # >= 40% overlap → very static
+    dynamic_overlap_max: float = 0.05  # <= 10% overlap → very dynamic
+
+    # Long-horizon travel distance (meters) in the XY-plane
+    static_travel_max: float = 2.0  # below → very likely static
+    dynamic_travel_min: float = 2.6  # above → very likely dynamic
 
 
 def _points_in_obb(
@@ -90,70 +94,73 @@ def classify_static_dynamic(
     scenes: List[Scene],
 ) -> None:
     """
-    New robust classifier using:
-        - EKF velocity
-        - OBB center drift
-        - OBB size stability
-        - OBB point-overlap
-        - sliding window + hysteresis
+    Robust classifier using:
+        - EKF velocity (short window)
+        - OBB center drift (short window)
+        - OBB point-overlap (short window)
+        - Long-horizon travel distance (XY)
+        - Sliding window + hysteresis
     """
 
     snaps: List[TrackSnapshot] = history.snapshots
     if len(snaps) < 2:
         return
 
-    # --- Sliding window selection ---
     t_last = snaps[-1].timestamp
-    t_min = t_last - conf.window_sec
-    window_snaps = [s for s in snaps if s.timestamp >= t_min]
+    t_min_short = t_last - conf.window_sec
+    window_snaps = [s for s in snaps if s.timestamp >= t_min_short]
     if len(window_snaps) < 2:
         window_snaps = snaps[-2:]
 
     times = np.array([s.timestamp for s in window_snaps])
     v_ekf = np.array([s.x_filt[3] for s in window_snaps])
     centers = np.stack([s.T_w[:3, 3] for s in window_snaps])
-    sizes = np.stack([s.sizes for s in window_snaps])
 
-    # --- EKF mean velocity ---
     v_mean = float(np.mean(np.abs(v_ekf)))
     history.mean_speed = v_mean
 
-    # --- Center drift speed ---
     dt = float(times[-1] - times[0])
     if dt < 1e-3:
         center_drift = 0.0
     else:
-        disp = float(np.linalg.norm(centers[-1] - centers[0]))
+        disp_vec = centers[-1, :2] - centers[0, :2]
+        disp = float(np.linalg.norm(disp_vec))
         center_drift = disp / dt
 
-    # --- Size deviation ---
-    mean_size = np.mean(sizes, axis=0)
-    size_dev = np.mean(np.linalg.norm(sizes - mean_size, axis=1))
-    rel_size_dev = size_dev / (np.linalg.norm(mean_size) + 1e-6)
-
-    # --- OBB overlap ---
     overlap_mean = _compute_overlap(history, scenes, window_snaps)
 
-    # previous state
+    t_min_long = t_last - conf.long_window_sec
+    long_snaps = [s for s in snaps if s.timestamp >= t_min_long]
+    if len(long_snaps) < 2:
+        long_snaps = snaps[-2:]
+
+    long_times = np.array([s.timestamp for s in long_snaps])
+    long_centers_xy = np.stack([s.T_w[:2, 3] for s in long_snaps])
+
+    dt_long = float(long_times[-1] - long_times[0])
+    if dt_long < 1e-3:
+        travel_dist = 0.0
+    else:
+        travel_vec = long_centers_xy[-1] - long_centers_xy[0]
+        travel_dist = float(np.linalg.norm(travel_vec))
+
+    # previous state for hysteresis
     prev_static = history.is_static
 
-    # --- Static conditions ---
     static_cond = (
         v_mean < conf.static_v_max
         and center_drift < conf.static_center_drift_max
-        and rel_size_dev < conf.static_rel_size_dev_max
         and overlap_mean > conf.static_overlap_min
+        and travel_dist < conf.static_travel_max
     )
 
-    # --- Dynamic conditions ---
     dynamic_cond = (
         v_mean > conf.dynamic_v_min
         or center_drift > conf.dynamic_center_drift_min
-        or rel_size_dev > conf.dynamic_rel_size_dev_min
         or overlap_mean < conf.dynamic_overlap_max
+        or travel_dist > conf.dynamic_travel_min
     )
 
-    # --- Hysteresis update ---
     if static_cond:
         history.is_static = True
     elif dynamic_cond:
