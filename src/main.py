@@ -14,7 +14,7 @@ def main(
     dataset_designation: Path = Path("UrbanIng-V2X/dataset/20241126_0017_crossing1_00"),
 ):
     root = Path("./datasets") / dataset_designation
-    N = 128
+    N = 200
     sweep_data = load_sequence_timesynced(root, max_frames=N)
     timestamps = list(sweep_data.keys())
 
@@ -36,6 +36,7 @@ def main(
 
     processed = process_sweeps(combined_sweeps[:N])
 
+    print("Creating tracks")
     tracker_conf = TrackingConf()
     tracker = Tracker(tracker_conf)
     result = tracker.fit(processed)

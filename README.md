@@ -108,59 +108,10 @@ This yields a clean separation between static infrastructure and moving objects.
 
 ---
 
-# Next Steps — TSDF Reconstruction Roadmap
-
-The upcoming development focuses entirely on **hybrid mesh reconstruction**.
+## 5. TSDF Mesh
 
 ---
 
-## Step 1 — Static TSDF Construction
-
-**Goal:** Generate the first full static mesh using only static points.
-
-### Plan
-
-1. Initialize a world-aligned voxel grid (5–8 cm resolution).  
-2. For each fused sweep:
-   - Extract static points  
-   - Compute signed distance values  
-   - Integrate into TSDF  
-3. Apply Marching Cubes for mesh extraction.  
-4. Visualize and refine the static mesh.  
-
-**Expected Output:**  
-A clean, watertight mesh of walls, buildings, poles, and ground structures.
-
----
-
-## Step 2 — Dynamic Object Reconstruction
-
-Dynamic objects can be reconstructed in two ways:
-
-### Option A — Simple Point-Cloud Fusion
-
-- Transform object clusters into track-local coordinates.  
-- Accumulate across frames.  
-- Render as consistent fused point clouds.
-
-### Option B — Per-Object TSDF Volumes
-
-- Create a small TSDF volume per tracked object.  
-- Transform incoming object points using EKF poses.  
-- Fuse into object-local TSDF.  
-- Extract clean per-object meshes.
-
-_Start with Option A for rapid iteration._
-
----
-
-## Step 3 — Hybrid Scene Composition
-
-- Render static TSDF mesh.  
-- Insert dynamic object reconstructions using their tracked poses.  
-- Produce a full time-lapse of the evolving scene.
-
----
 
 # About the Collaboration (Human + ChatGPT 5/5.1)
 

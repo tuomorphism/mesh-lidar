@@ -1,5 +1,6 @@
 from typing import List, Tuple
 import numpy as np
+from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
 from lidar_types import Scene, Cluster, TrackHistory, TrackSnapshot
 from tracking.tracking_types import Track, TrackingResult, TrackState, Observation
@@ -505,7 +506,9 @@ class Tracker:
 
         current_scene = scenes[0]
 
-        for k, next_scene in enumerate(scenes[1:], start=1):
+        for k, next_scene in enumerate(
+            tqdm(scenes[1:], desc="Tracking", total=len(scenes) - 1), start=1
+        ):
             if next_scene.scene_clusters is None:
                 result.det_to_track_per_scene.append([])
                 if (

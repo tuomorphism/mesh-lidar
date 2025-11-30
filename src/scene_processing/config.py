@@ -20,4 +20,4 @@ class Config:
     static_speed_thr = 0.3
     moving_speed_thr = 1.5
 
-    min_height_cutoff = 0.4  # Should be around 1-2 meters for pedestrians
+    min_height_cutoff = 0.4
