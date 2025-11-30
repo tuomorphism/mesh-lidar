@@ -11,10 +11,7 @@ This project implements a complete LiDAR perception pipeline for a **stationary 
 
 The pipeline produces a clean static reconstruction of the environment and overlays dynamic actors with long-term track identities — enabling HD mapping, roadside perception, and foundations for future SLAM systems.
 
-
-
-https://github.com/user-attachments/assets/9600b923-4259-4231-85cc-455184c2291e
-
+<img width="1229" height="723" alt="image" src="https://github.com/user-attachments/assets/1b4f011f-cee4-4d08-888b-258c328334e6" />
 
 
 ## 🚀 Implemented Features
