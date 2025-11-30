@@ -106,9 +106,6 @@ def classify_static_dynamic(
     if len(snaps) < 2:
         return
 
-    # -----------------------------
-    # Short window (instantaneous-ish)
-    # -----------------------------
     t_last = snaps[-1].timestamp
     t_min_short = t_last - conf.window_sec
     window_snaps = [s for s in snaps if s.timestamp >= t_min_short]
@@ -119,11 +116,9 @@ def classify_static_dynamic(
     v_ekf = np.array([s.x_filt[3] for s in window_snaps])
     centers = np.stack([s.T_w[:3, 3] for s in window_snaps])
 
-    # mean EKF speed
     v_mean = float(np.mean(np.abs(v_ekf)))
     history.mean_speed = v_mean
 
-    # center drift speed in XY
     dt = float(times[-1] - times[0])
     if dt < 1e-3:
         center_drift = 0.0
@@ -132,12 +127,8 @@ def classify_static_dynamic(
         disp = float(np.linalg.norm(disp_vec))
         center_drift = disp / dt
 
-    # OBB overlap
     overlap_mean = _compute_overlap(history, scenes, window_snaps)
 
-    # -----------------------------
-    # Long window (accumulated travel)
-    # -----------------------------
     t_min_long = t_last - conf.long_window_sec
     long_snaps = [s for s in snaps if s.timestamp >= t_min_long]
     if len(long_snaps) < 2:
@@ -153,17 +144,8 @@ def classify_static_dynamic(
         travel_vec = long_centers_xy[-1] - long_centers_xy[0]
         travel_dist = float(np.linalg.norm(travel_vec))
 
-    # optional: store for debugging / visualization
-    history.center_drift = center_drift
-    history.overlap_mean = overlap_mean
-    history.travel_dist = travel_dist
-
     prev_static = history.is_static
 
-    # -----------------------------
-    # Compose signals
-    # -----------------------------
-    # "Looks slow and stable right now"
     looks_static_now = (
         v_mean < conf.static_v_max
         and center_drift < conf.static_center_drift_max
@@ -171,25 +153,13 @@ def classify_static_dynamic(
         and travel_dist < conf.static_travel_max
     )
 
-    # "Clearly moving over horizon" (long-term)
     long_motion = travel_dist > conf.dynamic_travel_min
-
-    # "Clearly moving right now" (short-term)
     fast_now = (
         v_mean > conf.dynamic_v_min or center_drift > conf.dynamic_center_drift_min
     )
-
-    # overlap being very small is *supporting* evidence for dynamic,
-    # but shouldn't alone flip a static building
     poor_overlap = overlap_mean < conf.dynamic_overlap_max
 
-    # -----------------------------
-    # Asymmetric hysteresis
-    # -----------------------------
     if prev_static:
-        # Previously STATIC:
-        #   - keep it static unless we see strong, consistent motion.
-        #   - require combination of signals to flip to dynamic.
         flip_to_dynamic = (
             fast_now and long_motion
         ) or (  # moving now AND has moved far
@@ -202,8 +172,6 @@ def classify_static_dynamic(
             history.is_static = True
 
     else:
-        # Previously DYNAMIC:
-        #   - allow it to become static only if it really looks static.
         flip_to_static = looks_static_now
 
         if flip_to_static:

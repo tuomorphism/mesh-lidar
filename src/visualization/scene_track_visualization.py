@@ -95,7 +95,7 @@ def ellipse_lineset_from_cov_xy(
 
 
 # ---------------------------------------------------------------------
-# Scene & track viewer
+# Scene & track + mesh viewer
 # ---------------------------------------------------------------------
 
 
@@ -106,6 +106,7 @@ class SceneAndTrackViewer:
       - Cluster bounding boxes
       - Multi-object tracks (trajectories)
       - EKF uncertainty ellipses (position covariance)
+      - Optional static TSDF mesh of the environment
 
     Modes:
         1: Bounding boxes + entity-colored points
@@ -115,11 +116,15 @@ class SceneAndTrackViewer:
         5: Velocity-colored points
         6: Intensity-colored points
 
+    Extra:
+        M   : toggle static mesh on/off
+
     Controls:
         ←/A : previous frame
         →/D : next frame
         1-6 : change visualization mode
         B   : toggle bounding boxes on/off (where relevant)
+        M   : toggle static mesh on/off
         R   : reset viewpoint
         Q/ESC: quit
     """
@@ -139,6 +144,8 @@ class SceneAndTrackViewer:
         max_diag: float = 1e6,
         point_size: float = 2.0,
         box_line_width: float = 1.5,
+        static_mesh: Optional[o3d.geometry.TriangleMesh] = None,
+        static_mesh_color: Optional[np.ndarray] = None,
     ):
         if not scenes:
             raise ValueError("Provide at least one scene")
@@ -154,6 +161,23 @@ class SceneAndTrackViewer:
         self.min_diag = float(min_diag)
         self.max_diag = float(max_diag)
         self.show_boxes = True
+
+        # --- static mesh handling -------------------------------------------
+        self.static_mesh: Optional[o3d.geometry.TriangleMesh] = static_mesh
+        self.show_mesh: bool = static_mesh is not None
+        self._added_mesh: bool = False
+
+        if self.static_mesh is not None:
+            # Make a shallow copy so we can style it without touching original
+            self.static_mesh = o3d.geometry.TriangleMesh(self.static_mesh)
+            if not self.static_mesh.has_vertex_normals():
+                self.static_mesh.compute_vertex_normals()
+
+            if static_mesh_color is None:
+                # slightly warm grey
+                static_mesh_color = np.array([0.8, 0.8, 0.82], dtype=float)
+
+            self.static_mesh.paint_uniform_color(static_mesh_color.astype(float))
 
         self.vis = o3d.visualization.VisualizerWithKeyCallback()
         self.pcd = o3d.geometry.PointCloud()
@@ -358,6 +382,8 @@ class SceneAndTrackViewer:
     def _remove_all_overlays(self):
         """
         Remove all overlay geometries (boxes, track lines, cov ellipses).
+
+        Note: does NOT touch the static mesh.
         """
         for geom in (
             self._active_box_geoms + self._active_track_geoms + self._active_cov_geoms
@@ -370,6 +396,29 @@ class SceneAndTrackViewer:
         self._active_box_geoms.clear()
         self._active_track_geoms.clear()
         self._active_cov_geoms.clear()
+
+    # ------------------------------------------------------------------
+    # Static mesh management
+    # ------------------------------------------------------------------
+
+    def _update_mesh_in_vis(self):
+        """
+        Ensure the static mesh is in the visualizer if show_mesh is True,
+        or removed otherwise.
+        """
+        if self.static_mesh is None:
+            return
+
+        if self.show_mesh and not self._added_mesh:
+            # Add mesh (once); keep bounding box as is to avoid jumps
+            self.vis.add_geometry(self.static_mesh, reset_bounding_box=False)
+            self._added_mesh = True
+        elif not self.show_mesh and self._added_mesh:
+            try:
+                self.vis.remove_geometry(self.static_mesh, reset_bounding_box=False)
+            except Exception:
+                pass
+            self._added_mesh = False
 
     # ------------------------------------------------------------------
     # Scene setup
@@ -435,8 +484,12 @@ class SceneAndTrackViewer:
         if self._added_pcd:
             self.vis.update_geometry(self.pcd)
         else:
+            # First time: reset bounding box to fit points + mesh
             self.vis.add_geometry(self.pcd, reset_bounding_box=True)
             self._added_pcd = True
+
+        # always keep mesh consistent with show_mesh flag
+        self._update_mesh_in_vis()
 
         # render options
         opt = self.vis.get_render_option()
@@ -477,6 +530,16 @@ class SceneAndTrackViewer:
     def _cb_toggle_boxes(self, vis):
         self.show_boxes = not self.show_boxes
         self._set_scene(self.idx)
+        return False
+
+    def _cb_toggle_mesh(self, vis):
+        """
+        Toggle static mesh visibility.
+        """
+        self.show_mesh = not self.show_mesh
+        self._update_mesh_in_vis()
+        self.vis.update_renderer()
+        print(f"[Mesh] {'ON' if self.show_mesh else 'OFF'}")
         return False
 
     def _cb_reset(self, vis):
@@ -527,7 +590,7 @@ class SceneAndTrackViewer:
     # Run
     # ------------------------------------------------------------------
 
-    def run(self, title: str = "Scene & Tracks", w: int = 1280, h: int = 768):
+    def run(self, title: str = "Scene & Tracks + Mesh", w: int = 1280, h: int = 768):
         self.vis.create_window(title, width=w, height=h)
         self._set_scene(0)
 
@@ -539,6 +602,7 @@ class SceneAndTrackViewer:
 
         # overlays + modes
         self.vis.register_key_callback(ord("B"), self._cb_toggle_boxes)
+        self.vis.register_key_callback(ord("M"), self._cb_toggle_mesh)
         self.vis.register_key_callback(ord("R"), self._cb_reset)
         self.vis.register_key_callback(256, self._cb_quit)  # ESC
         self.vis.register_key_callback(ord("Q"), self._cb_quit)
@@ -553,7 +617,7 @@ class SceneAndTrackViewer:
 
         print(
             "[Controls] ←/A prev • →/D next • 1–6 modes • "
-            "B boxes on/off • R reset • Q/ESC quit"
+            "B boxes on/off • M mesh on/off • R reset • Q/ESC quit"
         )
         try:
             self.vis.run()
@@ -563,7 +627,7 @@ class SceneAndTrackViewer:
 
 def view_scene_and_tracks(
     viewer: SceneAndTrackViewer,
-    title: str = "Scene & Tracks",
+    title: str = "Scene & Tracks + Mesh",
     w: int = 1280,
     h: int = 768,
 ):
